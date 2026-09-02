@@ -46,6 +46,31 @@ os.makedirs(FILES_DIR, exist_ok=True)
 # Step delay seconds: 1s for step 1, 3s for step 2 & 3
 STEP_DELAYS = {1: 1.0, 2: 3.0, 3: 3.0}
 
+def _start_cloud_health_server():
+    """Lightweight HTTP server so Render / Koyeb free web service stays 100% active."""
+    import http.server
+    import socketserver
+    import threading
+
+    port = int(os.environ.get("PORT", 8080))
+    class HealthHandler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"WhatsApp 24/7 Engine is ONLINE!")
+        def log_message(self, format, *args):
+            pass
+
+    try:
+        httpd = socketserver.TCPServer(("", port), HealthHandler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        print(f"[HEALTH] Cloud health endpoint listening on port {port}", flush=True)
+    except Exception as e:
+        print(f"[HEALTH WARNING] {e}", flush=True)
+
+_start_cloud_health_server()
+
 # Keep track of handled incoming messages to avoid duplicates
 processed_messages = set()
 
