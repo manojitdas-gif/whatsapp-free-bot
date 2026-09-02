@@ -1,0 +1,12 @@
+services:
+  - type: worker
+    name: whatsapp-free-engine
+    env: docker
+    plan: free
+    region: singapore
+    autoDeploy: false
+    envVars:
+      - key: HEADLESS
+        value: "true"
+      - key: GOOGLE_SHEETS_WEBHOOK
+        sync: false
