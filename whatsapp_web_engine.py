@@ -173,21 +173,15 @@ async def send_reply(page, text: str) -> bool:
 async def process_chat(page, chat_item) -> None:
     """Reads unread messages from a chat, logs to Excel, and replies."""
     try:
-        # Dismiss any popup or dialog that might block clicks
-        modal = await page.query_selector('div[role="dialog"]')
-        if modal:
-            close_btn = (
-                await modal.query_selector('button[aria-label="Close"]')
-                or await modal.query_selector('div[role="button"]:has-text("Close")')
-                or await modal.query_selector('button:has-text("Not now")')
-            )
-            if close_btn:
-                await close_btn.click(force=True)
-            else:
-                await page.keyboard.press("Escape")
-            await asyncio.sleep(0.3)
+        # Dismiss any popup, banner or dialog that might block clicks
+        await page.evaluate('''() => {
+            const closeBtns = document.querySelectorAll('span[data-icon="x-alt"], span[data-icon="x"], button[aria-label="Close"], button[aria-label*="Not now"], div[role="dialog"] button');
+            for (const b of closeBtns) b.click();
+        }''')
+        await asyncio.sleep(0.2)
 
-        await chat_item.click(force=True)
+        # Native JS click dispatch so banners/overlays never block
+        await page.evaluate('el => { if (el) { el.dispatchEvent(new MouseEvent("mousedown", {bubbles: true})); el.dispatchEvent(new MouseEvent("mouseup", {bubbles: true})); el.click(); } }', chat_item)
         await asyncio.sleep(0.8)
 
         # 1. Extract contact name / phone from chat header
@@ -345,7 +339,7 @@ async def main():
                 if has_unread_digits or has_title_count:
                     print(f"[UNREAD] Detected incoming messages! (Filter: '{unread_text}', Title: '{page_title}')", flush=True)
                     if unread_btn:
-                        await unread_btn.click()
+                        await page.evaluate('el => { if (el) el.click(); }', unread_btn)
                         await asyncio.sleep(0.8)
 
                     first_chat_row = await page.evaluate_handle('''() => {
@@ -364,7 +358,7 @@ async def main():
                     # Reset filter to All
                     all_btn = await page.query_selector('button:has-text("All")') or await page.query_selector('div[role="button"]:has-text("All")')
                     if all_btn:
-                        await all_btn.click()
+                        await page.evaluate('el => { if (el) el.click(); }', all_btn)
                         await asyncio.sleep(0.5)
                 else:
                     # Also check active chat if currently open
