@@ -227,7 +227,7 @@ async def process_chat(page, chat_item) -> None:
             msg_text = "Hi"
 
         # Check for image
-        img_el = await latest_el.query_selector('img[src*="blob:"]')
+        img_el = await latest_el.query_selector('img[src*="blob:"]') if latest_el else None
         analyzed_products = ""
         if img_el:
             img_time = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
@@ -243,7 +243,7 @@ async def process_chat(page, chat_item) -> None:
                 print(f"[OCR ERROR] {e}")
 
         # Check for document
-        doc_el = await latest_el.query_selector('span[title*="."]') or await latest_el.query_selector('div[title*="."]')
+        doc_el = (await latest_el.query_selector('span[title*="."]') or await latest_el.query_selector('div[title*="."]')) if latest_el else None
         if doc_el:
             doc_title = await doc_el.get_attribute("title") or "document.pdf"
             if not msg_text:
