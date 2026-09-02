@@ -9,4 +9,4 @@ services:
       - key: HEADLESS
         value: "true"
       - key: GOOGLE_SHEETS_WEBHOOK
-        sync: false
+        value: "none"
