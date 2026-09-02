@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+data/customer_files/*
+data/bot_log.txt
+*.png
+raw_qr.png
+data/whatsapp_web_profile/Singleton*
+data/whatsapp_web_profile/*lock*
