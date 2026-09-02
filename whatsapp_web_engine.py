@@ -300,9 +300,10 @@ async def main():
 
     async with async_playwright() as p:
         # Launch persistent browser so login stays saved forever
+        is_headless = os.environ.get("HEADLESS", "true").lower() == "true"
         context = await p.chromium.launch_persistent_context(
             user_data_dir=SESSION_DIR,
-            headless=True,
+            headless=is_headless,
             viewport={"width": 1280, "height": 900},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             args=[
