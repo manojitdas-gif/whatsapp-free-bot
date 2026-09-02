@@ -207,8 +207,8 @@ async def process_chat(page, chat_item) -> None:
             # If name has no digits, use hash/name for session
             phone = "91" + re.sub(r'[^0-9]', '', str(abs(hash(contact_title))))[:10]
 
-        # 2. Extract latest incoming messages (div.message-in)
-        incoming_elements = await page.query_selector_all('div.message-in')
+        # 2. Extract latest incoming messages (div.message-in or false_ prefix)
+        incoming_elements = await page.query_selector_all('div.message-in, div[data-id*="false_"]')
         if not incoming_elements:
             return
 
@@ -324,18 +324,52 @@ async def main():
 
         while True:
             try:
-                # Look for unread message badges in the chat pane
-                unread_badges = await page.query_selector_all('span[aria-label*="unread"]')
-                if not unread_badges:
-                    unread_badges = await page.query_selector_all('span[data-testid="icon-unread-count"]')
+                # 1. Look for unread chats in left pane using robust evaluator
+                unread_item_handle = await page.evaluate_handle('''() => {
+                    const listItems = document.querySelectorAll('div#pane-side div[role="listitem"]');
+                    for (const item of listItems) {
+                        // Check for aria-label containing unread
+                        if (item.querySelector('span[aria-label*="unread"]')) return item;
+                        
+                        // Check for badge with number of unread messages
+                        const spans = item.querySelectorAll('span');
+                        for (const s of spans) {
+                            const txt = (s.innerText || '').trim();
+                            if (/^\\d+$/.test(txt) && parseInt(txt) > 0 && parseInt(txt) < 100) {
+                                const parentAria = s.parentElement ? (s.parentElement.getAttribute('aria-label') || '') : '';
+                                if (parentAria.includes('unread') || s.classList.length > 0) {
+                                    return item;
+                                }
+                            }
+                        }
+                    }
+                    return null;
+                }''')
 
-                if unread_badges:
-                    for badge in unread_badges:
-                        # Find the parent chat row element
-                        chat_item = await badge.evaluate_handle('el => el.closest("div[role=\'listitem\']") || el.closest("div[data-testid=\'cell-frame-container\']") || el.parentElement.parentElement')
-                        if chat_item:
-                            await process_chat(page, chat_item.as_element())
-                            break  # process one by one
+                unread_chat = unread_item_handle.as_element()
+                if unread_chat:
+                    await process_chat(page, unread_chat)
+                else:
+                    # 2. Also check if currently active chat has an unhandled incoming message
+                    active_header = await page.query_selector('div#main header')
+                    if active_header:
+                        latest_in = await page.query_selector('div#main div.message-in:last-child')
+                        if latest_in:
+                            text_el = await latest_in.query_selector('span.selectable-text') or await latest_in.query_selector('.copyable-text')
+                            if text_el:
+                                cur_text = (await text_el.inner_text()).strip()
+                                # Check if already processed
+                                title_el = await active_header.query_selector('span[title]')
+                                cur_title = (await title_el.inner_text()).strip() if title_el else "Customer"
+                                phone_match = re.search(r'\\+?\\d[\\d\\s-]{8,15}\\d', cur_title)
+                                cur_phone = sanitize_phone(phone_match.group(0)) if phone_match else sanitize_phone(cur_title)
+                                active_key = f"{cur_phone}:{cur_text}:active"
+                                if active_key not in processed_messages:
+                                    # Process currently open chat
+                                    active_item = await page.evaluate_handle('() => document.querySelector("div#pane-side div[role=\'listitem\'][aria-selected=\'true\']") || document.querySelector("div#pane-side div[role=\'listitem\']")')
+                                    if active_item and active_item.as_element():
+                                        await process_chat(page, active_item.as_element())
+                                        processed_messages.add(active_key)
 
                 flush_pending_excel_queue()
                 await asyncio.sleep(1.0)
