@@ -137,26 +137,16 @@ async def wait_for_login(page) -> bool:
 async def send_reply(page, text: str) -> bool:
     """Sends a text message through WhatsApp Web active chat."""
     try:
-        # Wait up to 5 seconds for message input box to render
-        input_box = None
-        for _ in range(10):
-            input_box = (
-                await page.query_selector('footer div[contenteditable="true"]')
-                or await page.query_selector('div[data-tab="10"][contenteditable="true"]')
-                or await page.query_selector('div[title="Type a message"]')
-                or await page.query_selector('div[role="textbox"][contenteditable="true"]')
-                or await page.query_selector('p.selectable-text')
-            )
-            if input_box:
-                break
-            await asyncio.sleep(0.5)
-
+        input_box = await page.wait_for_selector(
+            'footer div[contenteditable="true"], div[title="Type a message"], div[role="textbox"][contenteditable="true"]',
+            timeout=10000
+        )
         if not input_box:
             print("[SEND ERROR] Message input box not found in active chat.", flush=True)
             return False
 
-        await page.evaluate('el => { if (el) { el.focus(); el.click(); } }', input_box)
-        await asyncio.sleep(0.3)
+        await input_box.click()
+        await asyncio.sleep(0.2)
 
         # Type message multiline if needed
         lines = text.split("\n")
@@ -179,15 +169,16 @@ async def send_reply(page, text: str) -> bool:
 async def process_chat(page, chat_item) -> None:
     """Reads unread messages from a chat, logs to Excel, and replies."""
     try:
-        # Dismiss any popup, banner or dialog that might block clicks
-        await page.evaluate('''() => {
-            const closeBtns = document.querySelectorAll('span[data-icon="x-alt"], span[data-icon="x"], button[aria-label="Close"], button[aria-label*="Not now"], div[role="dialog"] button');
-            for (const b of closeBtns) b.click();
-        }''')
-        await asyncio.sleep(0.2)
+        # Dismiss any popup or banner that might block clicks
+        close_btn = await page.query_selector('span[data-icon="x-alt"], span[data-icon="x"], button[aria-label="Close"]')
+        if close_btn:
+            try:
+                await close_btn.click()
+                await asyncio.sleep(0.3)
+            except Exception:
+                pass
 
-        # Native JS click dispatch so banners/overlays never block
-        await page.evaluate('el => { if (el) { el.dispatchEvent(new MouseEvent("mousedown", {bubbles: true})); el.dispatchEvent(new MouseEvent("mouseup", {bubbles: true})); el.click(); } }', chat_item)
+        await chat_item.click()
         await asyncio.sleep(1.5)
 
         # 1. Extract contact name / phone from chat header
@@ -348,18 +339,9 @@ async def main():
                         await page.evaluate('el => { if (el) el.click(); }', unread_btn)
                         await asyncio.sleep(0.8)
 
-                    first_chat_row = await page.evaluate_handle('''() => {
-                        const pane = document.querySelector('div#pane-side');
-                        if (!pane) return null;
-                        const titleSpan = pane.querySelector('span[title]');
-                        if (titleSpan) {
-                            return titleSpan.closest('div[tabindex]') || titleSpan.closest('div[role="gridcell"]') || titleSpan.parentElement.parentElement.parentElement;
-                        }
-                        return null;
-                    }''')
-
-                    if first_chat_row and first_chat_row.as_element():
-                        await process_chat(page, first_chat_row.as_element())
+                    first_chat_row = await page.query_selector('div#pane-side span[title]')
+                    if first_chat_row:
+                        await process_chat(page, first_chat_row)
 
                     # Reset filter to All
                     all_btn = await page.query_selector('button:has-text("All")') or await page.query_selector('div[role="button"]:has-text("All")')
