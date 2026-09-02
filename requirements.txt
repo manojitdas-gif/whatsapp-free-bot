@@ -3,3 +3,6 @@ openpyxl==3.1.5
 python-dotenv==1.0.1
 Pillow
 playwright
+pypdf
+xlrd
+python-docx
