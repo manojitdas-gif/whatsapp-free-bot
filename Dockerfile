@@ -1,7 +1,6 @@
 # 100% Free 24/7 Cloud Dockerfile for WhatsApp Automation Engine
 FROM mcr.microsoft.com/playwright/python:v1.42.0-jammy
 
-# Chromium and Playwright are already pre-installed in this base image
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONUTF8=1
 ENV HEADLESS=true
@@ -11,7 +10,7 @@ WORKDIR /app
 
 # Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --break-system-packages -r requirements.txt || pip install --no-cache-dir -r requirements.txt
 
 # Copy all application files
 COPY . .
