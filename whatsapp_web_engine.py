@@ -137,20 +137,26 @@ async def wait_for_login(page) -> bool:
 async def send_reply(page, text: str) -> bool:
     """Sends a text message through WhatsApp Web active chat."""
     try:
-        # Selector for message input box in WhatsApp Web
-        input_box = (
-            await page.query_selector('footer div[contenteditable="true"]')
-            or await page.query_selector('div[data-tab="10"][contenteditable="true"]')
-            or await page.query_selector('div[title="Type a message"]')
-            or await page.query_selector('div[role="textbox"][contenteditable="true"]')
-            or await page.query_selector('p.selectable-text')
-        )
+        # Wait up to 5 seconds for message input box to render
+        input_box = None
+        for _ in range(10):
+            input_box = (
+                await page.query_selector('footer div[contenteditable="true"]')
+                or await page.query_selector('div[data-tab="10"][contenteditable="true"]')
+                or await page.query_selector('div[title="Type a message"]')
+                or await page.query_selector('div[role="textbox"][contenteditable="true"]')
+                or await page.query_selector('p.selectable-text')
+            )
+            if input_box:
+                break
+            await asyncio.sleep(0.5)
+
         if not input_box:
             print("[SEND ERROR] Message input box not found in active chat.", flush=True)
             return False
 
-        await input_box.click(force=True)
-        await asyncio.sleep(0.2)
+        await page.evaluate('el => { if (el) { el.focus(); el.click(); } }', input_box)
+        await asyncio.sleep(0.3)
 
         # Type message multiline if needed
         lines = text.split("\n")
@@ -182,7 +188,7 @@ async def process_chat(page, chat_item) -> None:
 
         # Native JS click dispatch so banners/overlays never block
         await page.evaluate('el => { if (el) { el.dispatchEvent(new MouseEvent("mousedown", {bubbles: true})); el.dispatchEvent(new MouseEvent("mouseup", {bubbles: true})); el.click(); } }', chat_item)
-        await asyncio.sleep(0.8)
+        await asyncio.sleep(1.5)
 
         # 1. Extract contact name / phone from chat header
         header_title_el = await page.query_selector('header span[title]') or await page.query_selector('header div[role="button"] span')
