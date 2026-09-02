@@ -1,5 +1,5 @@
 services:
-  - type: worker
+  - type: web
     name: whatsapp-free-engine
     env: docker
     plan: free
