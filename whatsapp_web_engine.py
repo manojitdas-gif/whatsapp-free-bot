@@ -325,49 +325,56 @@ async def main():
 
         while True:
             try:
-                # 1. Look for unread chats in left pane using robust evaluator
-                unread_item_handle = await page.evaluate_handle('''() => {
-                    const listItems = document.querySelectorAll('div#pane-side div[role="listitem"]');
-                    for (const item of listItems) {
-                        // Check for aria-label containing unread
-                        if (item.querySelector('span[aria-label*="unread"]')) return item;
-                        
-                        // Check for badge with number of unread messages
-                        const spans = item.querySelectorAll('span');
-                        for (const s of spans) {
-                            const txt = (s.innerText || '').trim();
-                            if (/^\\d+$/.test(txt) && parseInt(txt) > 0 && parseInt(txt) < 100) {
-                                const parentAria = s.parentElement ? (s.parentElement.getAttribute('aria-label') || '') : '';
-                                if (parentAria.includes('unread') || s.classList.length > 0) {
-                                    return item;
-                                }
-                            }
-                        }
-                    }
-                    return null;
-                }''')
+                # Check Unread button text or page title for unread count
+                unread_btn = (
+                    await page.query_selector('button:has-text("Unread")')
+                    or await page.query_selector('div[role="button"]:has-text("Unread")')
+                    or await page.query_selector('span:has-text("Unread")')
+                )
+                unread_text = (await unread_btn.inner_text()).strip() if unread_btn else ""
+                has_unread_digits = bool(re.search(r'\d+', unread_text))
+                page_title = await page.title()
+                has_title_count = page_title.startswith("(")
 
-                unread_chat = unread_item_handle.as_element()
-                if unread_chat:
-                    await process_chat(page, unread_chat)
+                if has_unread_digits or has_title_count:
+                    print(f"[UNREAD] Detected incoming messages! (Filter: '{unread_text}', Title: '{page_title}')", flush=True)
+                    if unread_btn:
+                        await unread_btn.click()
+                        await asyncio.sleep(0.8)
+
+                    first_chat_row = await page.evaluate_handle('''() => {
+                        const pane = document.querySelector('div#pane-side');
+                        if (!pane) return null;
+                        const titleSpan = pane.querySelector('span[title]');
+                        if (titleSpan) {
+                            return titleSpan.closest('div[tabindex]') || titleSpan.closest('div[role="gridcell"]') || titleSpan.parentElement.parentElement.parentElement;
+                        }
+                        return null;
+                    }''')
+
+                    if first_chat_row and first_chat_row.as_element():
+                        await process_chat(page, first_chat_row.as_element())
+
+                    # Reset filter to All
+                    all_btn = await page.query_selector('button:has-text("All")') or await page.query_selector('div[role="button"]:has-text("All")')
+                    if all_btn:
+                        await all_btn.click()
+                        await asyncio.sleep(0.5)
                 else:
-                    # 2. Also check if currently active chat has an unhandled incoming message
-                    active_header = await page.query_selector('div#main header')
+                    # Also check active chat if currently open
+                    active_header = await page.query_selector('header span[title]')
                     if active_header:
-                        latest_in = await page.query_selector('div#main div.message-in:last-child')
+                        latest_in = await page.query_selector('div.message-in:last-child, div[data-id*="false_"]:last-child')
                         if latest_in:
                             text_el = await latest_in.query_selector('span.selectable-text') or await latest_in.query_selector('.copyable-text')
                             if text_el:
                                 cur_text = (await text_el.inner_text()).strip()
-                                # Check if already processed
-                                title_el = await active_header.query_selector('span[title]')
-                                cur_title = (await title_el.inner_text()).strip() if title_el else "Customer"
-                                phone_match = re.search(r'\\+?\\d[\\d\\s-]{8,15}\\d', cur_title)
+                                cur_title = (await active_header.inner_text()).strip()
+                                phone_match = re.search(r'\+?\d[\d\s-]{8,15}\d', cur_title)
                                 cur_phone = sanitize_phone(phone_match.group(0)) if phone_match else sanitize_phone(cur_title)
                                 active_key = f"{cur_phone}:{cur_text}:active"
                                 if active_key not in processed_messages:
-                                    # Process currently open chat
-                                    active_item = await page.evaluate_handle('() => document.querySelector("div#pane-side div[role=\'listitem\'][aria-selected=\'true\']") || document.querySelector("div#pane-side div[role=\'listitem\']")')
+                                    active_item = await page.evaluate_handle('() => document.querySelector("div#pane-side span[title]") ? document.querySelector("div#pane-side span[title]").parentElement.parentElement.parentElement : null')
                                     if active_item and active_item.as_element():
                                         await process_chat(page, active_item.as_element())
                                         processed_messages.add(active_key)
