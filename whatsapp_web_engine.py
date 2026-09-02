@@ -141,7 +141,9 @@ async def send_reply(page, text: str) -> bool:
         input_box = (
             await page.query_selector('footer div[contenteditable="true"]')
             or await page.query_selector('div[data-tab="10"][contenteditable="true"]')
+            or await page.query_selector('div[title="Type a message"]')
             or await page.query_selector('div[role="textbox"][contenteditable="true"]')
+            or await page.query_selector('p.selectable-text')
         )
         if not input_box:
             print("[SEND ERROR] Message input box not found in active chat.", flush=True)
@@ -207,18 +209,22 @@ async def process_chat(page, chat_item) -> None:
             # If name has no digits, use hash/name for session
             phone = "91" + re.sub(r'[^0-9]', '', str(abs(hash(contact_title))))[:10]
 
-        # 2. Extract latest incoming messages (div.message-in or false_ prefix)
+        # 2. Extract latest incoming messages
         incoming_elements = await page.query_selector_all('div.message-in, div[data-id*="false_"]')
-        if not incoming_elements:
-            return
-
-        latest_el = incoming_elements[-1]
         msg_text = ""
+        latest_el = incoming_elements[-1] if incoming_elements else None
+        if latest_el:
+            text_el = await latest_el.query_selector('span.selectable-text') or await latest_el.query_selector('.copyable-text')
+            if text_el:
+                msg_text = (await text_el.inner_text()).strip()
 
-        # Check for text
-        text_el = await latest_el.query_selector('span.selectable-text') or await latest_el.query_selector('.copyable-text')
-        if text_el:
-            msg_text = (await text_el.inner_text()).strip()
+        if not msg_text:
+            text_els = await page.query_selector_all('div#main span.selectable-text, div#main .copyable-text')
+            if text_els:
+                msg_text = (await text_els[-1].inner_text()).strip()
+
+        if not msg_text:
+            msg_text = "Hi"
 
         # Check for image
         img_el = await latest_el.query_selector('img[src*="blob:"]')
