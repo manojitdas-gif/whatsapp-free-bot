@@ -21,10 +21,25 @@ import os
 import re
 import csv
 import subprocess
-import pypdf
-import openpyxl
-import xlrd
-import docx
+try:
+    import pypdf
+except ImportError:
+    pypdf = None
+
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
+
+try:
+    import xlrd
+except ImportError:
+    xlrd = None
+
+try:
+    import docx
+except ImportError:
+    docx = None
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OCR_SCRIPT = os.path.join(BASE_DIR, "ocr_engine.ps1")
