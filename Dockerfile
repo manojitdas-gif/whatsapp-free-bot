@@ -5,27 +5,22 @@ FROM mcr.microsoft.com/playwright/python:v1.42.0-jammy
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONUTF8=1
 ENV HEADLESS=true
+ENV PORT=8080
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    tesseract-ocr \
-    tesseract-ocr-eng \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy and install python dependencies
+# Install Python requirements
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browser
-RUN playwright install chromium
+# Ensure Chromium browser is ready
+RUN python3 -m playwright install chromium
 
-# Copy application files
+# Copy all application files
 COPY . .
 
-# Expose health port if required by cloud hosts
+# Expose cloud health port
 EXPOSE 8080
 
-# Run supervisor watchdog 24/7
-CMD ["python", "-u", "watchdog.py"]
+# Start 24/7 WhatsApp engine
+CMD ["python3", "-u", "whatsapp_web_engine.py"]
