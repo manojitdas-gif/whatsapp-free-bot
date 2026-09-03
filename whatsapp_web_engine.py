@@ -88,6 +88,8 @@ BOT_REPLY_PREFIXES = (
     "🙏 *Thank you for sharing all your details!",
     "📋 *Please share your product requirements!",
     "🏢 *Please share your business details!",
+    "⚠️ *Please share your product requirements",
+    "⚠️ *Please share your business details",
     "Thank you for contacting us",
     "Thank you for sharing your requirements",
     "Thanks for sharing all the details",
@@ -411,12 +413,13 @@ async def process_active_chat(page) -> None:
         success = await send_reply(page, get_step_message(1))
         if success:
             mark_bot_reply_sent(phone, 1, triggered_by_text=latest_msg)
-            # Log first contact (name only at this point)
+            # Log first contact — name from WhatsApp profile, no requirements yet
             log_customer_lead(
                 sender_phone=phone,
                 sender_name=name,
                 message_text=latest_msg,
                 ocr_text="",
+                requirements="",
             )
             print(f"         ✅ Step 1 sent to {phone}!", flush=True)
         return
@@ -425,88 +428,121 @@ async def process_active_chat(page) -> None:
     # STEP 1 or STEP 2: Wait for stop-typing (2s silence), then validate & reply
     # ══════════════════════════════════════════════════════════════════════════
     if current_step in (1, 2):
-        step_label = "requirements" if current_step == 1 else "business details"
-        print(f"         ⏳ Step {current_step}: waiting for customer to finish ({TYPING_SILENCE_S}s silence)...", flush=True)
+        print(f"         ⏳ Step {current_step}: waiting for customer to stop sending ({TYPING_SILENCE_S}s silence)...", flush=True)
 
         # ── Poll until customer has been silent for TYPING_SILENCE_S seconds ──
+        # If customer keeps sending (texts, photos, files) — keep waiting.
+        # If customer stops replying entirely — bot also stops (no auto reply).
         silence_start = time.time()
         while True:
             await asyncio.sleep(0.5)
 
-            # Re-read messages to detect new ones
             msgs_now = await extract_chat_messages(page)
             incoming_now = [m for m in msgs_now if not m['isOut'] and not _is_bot_reply(m['text'])]
 
             if incoming_now and incoming_now[-1]['text'] != latest_msg:
-                # Customer sent another message — reset silence timer
+                # Customer sent more — reset silence timer, keep waiting
                 latest_msg = incoming_now[-1]['text']
                 _last_seen[phone]["text"] = latest_msg
                 record_customer_message_time(phone)
                 silence_start = time.time()
-                print(f"         📝 Customer still sending... resetting silence timer.", flush=True)
+                print(f"         📝 Customer still sending... waiting for silence.", flush=True)
                 continue
 
             if (time.time() - silence_start) >= TYPING_SILENCE_S:
-                break
+                break  # Customer stopped for 2s — now process
 
         print(f"         ✓ Customer stopped. Collecting all messages and media...", flush=True)
 
-        # ── Collect ALL customer text messages since last bot reply ────────────
+        # ── Collect ALL customer text messages (up to last 10) ────────────────
         all_msgs_final = await extract_chat_messages(page)
         all_incoming   = [m['text'] for m in all_msgs_final if not m['isOut'] and not _is_bot_reply(m['text'])]
-        # Take up to last 10 customer messages for entity extraction
         combined_customer_text = "\n".join(all_incoming[-10:])
 
-        # ── Collect ALL customer media (images, docs, files) ──────────────────
+        # ── Collect ALL customer media (images, docs, screenshots, PDFs, etc.) ─
         ocr_text, has_media = await collect_all_media_text(page, phone)
 
-        # Wait the configured reply delay
+        # Pause before sending reply
         await asyncio.sleep(REPLY_DELAY_S)
 
-        # ── Validate customer input for this step ─────────────────────────────
+        # ══════════════════════════════════════════════════════════════════════
+        # STEP 1: Customer should share product requirements
+        # ══════════════════════════════════════════════════════════════════════
         if current_step == 1:
             valid = validate_step1_reply(combined_customer_text, has_image=has_media, has_document=has_media)
 
             if valid:
-                # Log to Excel with extracted entity data
+                # Parse product requirements from all customer text + OCR text
+                from document_analyzer import parse_product_details
+                all_text_for_req = "\n".join(filter(None, [combined_customer_text, ocr_text]))
+                parsed_req = parse_product_details(all_text_for_req)
+                # If parser didn't extract structured items, use raw customer text (cleaned)
+                if not parsed_req:
+                    parsed_req = combined_customer_text[:1000]
+
+                # Save to Excel: requirements + any entity data found in text
                 log_customer_lead(
                     sender_phone=phone,
                     sender_name=name,
                     message_text=combined_customer_text,
                     ocr_text=ocr_text,
+                    requirements=parsed_req,
                 )
+
                 # Send Step 2
                 success = await send_reply(page, get_step_message(2))
                 if success:
                     mark_bot_reply_sent(phone, 2, triggered_by_text=latest_msg)
                     print(f"         ✅ Step 2 sent to {phone}!", flush=True)
             else:
-                print(f"         ⚠ No requirements detected — sending retry.", flush=True)
-                await send_reply(page, get_retry_message(1))
+                # Customer sent irrelevant data — send specific error message
+                error_msg = (
+                    "⚠️ *Please share your product requirements correctly!*\n\n"
+                    "We need the following details to prepare your quotation:\n"
+                    "📦 *Product name* and description\n"
+                    "🔢 *Quantity* required\n"
+                    "📐 *Size / Specifications*\n\n"
+                    "📎 You can also share a *photo, catalogue, PDF or any document*."
+                )
+                await send_reply(page, error_msg)
                 mark_bot_reply_sent(phone, 1, triggered_by_text=latest_msg)
-                print(f"         🔁 Requirements request sent to {phone}.", flush=True)
+                print(f"         ⚠ Requirements error message sent to {phone}.", flush=True)
 
+        # ══════════════════════════════════════════════════════════════════════
+        # STEP 2: Customer should share business details
+        # ══════════════════════════════════════════════════════════════════════
         elif current_step == 2:
             valid = validate_step2_reply(combined_customer_text, has_image=has_media, has_document=has_media)
 
             if valid:
-                # Log business details to Excel
+                # Save business details to Excel (same row, fills empty cells only)
                 log_customer_lead(
                     sender_phone=phone,
                     sender_name=name,
                     message_text=combined_customer_text,
                     ocr_text=ocr_text,
+                    requirements="",  # Don't overwrite requirements at this step
                 )
+
                 # Send Step 3
                 success = await send_reply(page, get_step_message(3))
                 if success:
                     mark_bot_reply_sent(phone, 3, triggered_by_text=latest_msg)
                     print(f"         ✅ Step 3 sent to {phone}! Flow complete.", flush=True)
             else:
-                print(f"         ⚠ No business details detected — sending retry.", flush=True)
-                await send_reply(page, get_retry_message(2))
+                # Customer didn't share business details — specific error message
+                error_msg = (
+                    "⚠️ *Please share your business details correctly!*\n\n"
+                    "We need the following to process your quotation:\n"
+                    "🏢 *Company / Business Name*\n"
+                    "📋 *GST Number* (if applicable)\n"
+                    "📍 *Complete Business Address* (with pin code)\n"
+                    "👤 *Contact Person Name*\n\n"
+                    "📎 You can also share a *visiting card or letterhead photo*."
+                )
+                await send_reply(page, error_msg)
                 mark_bot_reply_sent(phone, 2, triggered_by_text=latest_msg)
-                print(f"         🔁 Business details request sent to {phone}.", flush=True)
+                print(f"         ⚠ Business details error message sent to {phone}.", flush=True)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -538,7 +574,7 @@ async def main():
     print("  📱  Mode    : Local WhatsApp Web (Playwright)", flush=True)
     print("  💸  Cost    : ₹0.00 Forever", flush=True)
     print("  ✅  Flow    : Step 1 → Step 2 → Step 3 (with validation)", flush=True)
-    print("  📊  Excel   : 8 columns — exact match to your template", flush=True)
+    print("  📊  Excel   : 9 columns — with Requirements Details", flush=True)
     print("  📎  Media   : Photos, PDFs, Word, Excel, Screenshots supported", flush=True)
     print("=" * 60, flush=True)
 
