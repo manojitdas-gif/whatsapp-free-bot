@@ -310,13 +310,24 @@ async def process_active_chat(page) -> None:
 
     latest_msg = incoming[-1]['text']
 
+    # ── FILTER: reject if this is actually one of the bot's own reply messages ──
+    # (Sometimes WhatsApp Web mis-classifies the bot's own sent message as incoming
+    #  for a split second before the DOM updates the 'message-out' class.)
+    BOT_REPLY_PREFIXES = (
+        "🙏 *Thank you for contacting us!",
+        "✅ *Thank you for sharing your requirements!",
+        "🙏 *Thanks for sharing all the details!",
+        "🙏 *Thank you for sharing all your details!",
+        "📋 *Please share your product requirements!",
+        "🏢 *Please share your business details!",
+    )
+    if any(latest_msg.startswith(p[:30]) for p in BOT_REPLY_PREFIXES):
+        return  # This is the bot's own message — skip
+
     # ── DEDUPLICATION: skip if this is the same message we already processed ──
     prev = _last_seen.get(phone, {})
     if prev.get("text") == latest_msg:
-        # Message unchanged — update the timestamp for stop-typing tracking
-        if not prev.get("recorded"):
-            record_customer_message_time(phone)
-            _last_seen[phone]["recorded"] = True
+        # Message unchanged — nothing new from the customer
         return
 
     # New incoming message detected!
@@ -331,7 +342,7 @@ async def process_active_chat(page) -> None:
     current_step, can_advance = register_customer_incoming_message(phone, latest_msg)
 
     if not can_advance:
-        print(f"         [INFO] Step {current_step} — no reply needed (completed or waiting).", flush=True)
+        print(f"         [WAIT] Step {current_step} — bot replied, waiting for customer's next message.", flush=True)
         return
 
     # ── STEP 0 → Reply immediately after 2s (Step 1 message) ─────────────────
@@ -341,7 +352,10 @@ async def process_active_chat(page) -> None:
         reply = get_step_message(1)
         success = await send_reply(page, reply)
         if success:
-            mark_bot_reply_sent(phone, 1)
+            # Pass the customer's triggering message so state machine knows what was replied to
+            mark_bot_reply_sent(phone, 1, triggered_by_text=latest_msg)
+            # Keep _last_seen text as latest_msg (do NOT reset to "") —
+            # so next loop tick the same "Hi" is not re-processed as a new message.
             _last_seen[phone]["pending_reply"] = False
 
             # Log to Excel (first contact)
@@ -409,18 +423,22 @@ async def process_active_chat(page) -> None:
                 reply = get_step_message(2)
                 success = await send_reply(page, reply)
                 if success:
-                    mark_bot_reply_sent(phone, 2)
+                    # Store the customer message that triggered this reply — so state machine
+                    # won't fire again until a genuinely NEW customer message arrives.
+                    mark_bot_reply_sent(phone, 2, triggered_by_text=latest_msg)
                     _last_seen[phone]["pending_reply"] = False
-                    _last_seen[phone]["text"] = ""  # Reset to detect next customer reply
+                    # Do NOT reset text to "" — keep latest_msg so deduplication works correctly
                     print(f"         ✅ Step 2 sent to {phone}!", flush=True)
             else:
-                # Validation failed — ask again (retry)
-                print(f"         ⚠ Step 1 validation failed — sending retry request.", flush=True)
+                # Validation failed — send retry, but do NOT advance step.
+                # Record combined_text as last_replied_text so the SAME message
+                # won't re-trigger this retry forever — customer must send something new.
+                print(f"         ⚠ Step 1 validation — asking customer to share requirements.", flush=True)
                 retry = get_retry_message(1)
                 await send_reply(page, retry)
-                # DON'T advance state — customer must reply again
-                _last_seen[phone]["text"] = ""
-                print(f"         🔁 Retry request sent to {phone}.", flush=True)
+                mark_bot_reply_sent(phone, 1, triggered_by_text=latest_msg)  # Stay at step 1 but lock
+                _last_seen[phone]["pending_reply"] = False
+                print(f"         🔁 Requirements request sent to {phone}.", flush=True)
 
         elif current_step == 2:
             # Validate: did customer share business details?
@@ -439,16 +457,16 @@ async def process_active_chat(page) -> None:
                 reply = get_step_message(3)
                 success = await send_reply(page, reply)
                 if success:
-                    mark_bot_reply_sent(phone, 3)
+                    mark_bot_reply_sent(phone, 3, triggered_by_text=latest_msg)
                     _last_seen[phone]["pending_reply"] = False
-                    _last_seen[phone]["text"] = ""
                     print(f"         ✅ Step 3 sent to {phone}! Flow complete.", flush=True)
             else:
-                print(f"         ⚠ Step 2 validation failed — sending retry request.", flush=True)
+                print(f"         ⚠ Step 2 validation — asking customer to share business details.", flush=True)
                 retry = get_retry_message(2)
                 await send_reply(page, retry)
-                _last_seen[phone]["text"] = ""
-                print(f"         🔁 Business details retry sent to {phone}.", flush=True)
+                mark_bot_reply_sent(phone, 2, triggered_by_text=latest_msg)  # Stay at step 2 but lock
+                _last_seen[phone]["pending_reply"] = False
+                print(f"         🔁 Business details request sent to {phone}.", flush=True)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
