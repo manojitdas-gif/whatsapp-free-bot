@@ -1,22 +1,25 @@
 """
-excel_logger.py — Real-time Customer Lead Logger for WhatsApp (10 Columns).
+excel_logger.py — Clean 10-Column Customer Lead Logger.
 
-EXACT 10 COLUMNS:
-  1. S.No.
-  2. First Contact Date (IST)
-  3. Last Contact Date (IST)
-  4. Contact Person Name (Who is messaging me)
-  5. WhatsApp Number
-  6. Email ID (Dedicated email column)
-  7. Company / Business Name
-  8. GST Number
-  9. Complete Address (Full address only, without truncation)
-  10. Customer Requirements Details (Pure product details only)
+COLUMNS (raw data only — no decorative dashes, no bot messages):
+  1.  S.No.
+  2.  First Contact Date (IST)
+  3.  Last Contact Date (IST)
+  4.  Contact Person Name
+  5.  WhatsApp Number
+  6.  Email ID
+  7.  Company / Business Name
+  8.  GST Number
+  9.  Complete Address
+  10. Requirements Details
 
-FEATURES:
-  - Real-time instant logging: Extracts pure product details, email, full address, company name, GST.
-  - Keeps both Desktop Excel files (WhatsApp_Conversations.xlsx & WhatsApp_Leads_SHARED.xlsx) and live CSV synced.
-  - Zero bot/owner messages. Customer details only.
+RULES:
+  - A customer row is created once (on first message).
+  - Each subsequent message ONLY fills in NEW data to empty cells.
+  - Empty cell = blank (no dashes, no placeholders).
+  - Requirements are accumulated across messages (appended, not overwritten).
+  - Saves to Desktop: WhatsApp_Conversations.xlsx & WhatsApp_Leads_SHARED.xlsx
+  - Also saves live CSV: WhatsApp_Leads_Live.csv
 """
 
 import os
@@ -48,133 +51,157 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 QUEUE_FILE = os.path.join(BASE_DIR, "data", "pending_lead_queue.json")
 CSV_PATH = os.path.join(os.path.expanduser("~"), "Desktop", "WhatsApp_Leads_Live.csv")
 
-# Styling: Deep Emerald Header & Segoe UI
-HEADER_FILL = PatternFill("solid", fgColor="0B5345")
-HEADER_FONT = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
-DATA_FONT = Font(name="Segoe UI", size=10)
-BOLD_FONT = Font(name="Segoe UI", size=10, bold=True)
+# Header style: Deep green
+HEADER_FILL = PatternFill("solid", fgColor="1B5E20")
+HEADER_FONT = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+DATA_FONT   = Font(name="Calibri", size=10)
 
 THIN_BORDER = Border(
-    left=Side(style="thin", color="E0E0E0"),
-    right=Side(style="thin", color="E0E0E0"),
-    top=Side(style="thin", color="E0E0E0"),
-    bottom=Side(style="thin", color="E0E0E0"),
+    left  =Side(style="thin", color="CCCCCC"),
+    right =Side(style="thin", color="CCCCCC"),
+    top   =Side(style="thin", color="CCCCCC"),
+    bottom=Side(style="thin", color="CCCCCC"),
 )
 
 HEADERS = [
     "S.No.",
-    "First Contact Date (IST)",
-    "Last Contact Date (IST)",
-    "Contact Person Name",
+    "First Contact (IST)",
+    "Last Contact (IST)",
+    "Contact Name",
     "WhatsApp Number",
     "Email ID",
     "Company / Business Name",
     "GST Number",
     "Complete Address",
-    "Customer Requirements Details",
+    "Requirements Details",
 ]
-WIDTHS = [8, 22, 22, 24, 20, 28, 30, 22, 45, 65]
+# Column widths in characters
+WIDTHS = [7, 20, 20, 22, 18, 28, 30, 22, 40, 60]
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# HELPER: Phone display format
+# ──────────────────────────────────────────────────────────────────────────────
 
 def format_phone_display(raw_phone: str) -> str:
-    p = str(raw_phone or "").replace("+", "").replace(" ", "").strip()
+    p = re.sub(r'[^\d]', '', str(raw_phone or ""))
     if p.startswith("91") and len(p) == 12:
         return f"+91 {p[2:7]} {p[7:]}"
-    elif p:
-        return f"+{p}"
-    return "Unknown"
+    if len(p) == 10:
+        return f"+91 {p[:5]} {p[5:]}"
+    return f"+{p}" if p else "Unknown"
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ENTITY EXTRACTION — Email, GST, Address, Company, Contact Name
+# ──────────────────────────────────────────────────────────────────────────────
 
 def extract_lead_entities(text: str, profile_name: str = "", is_business_step: bool = False) -> dict:
     """
-    Extract Email ID, Complete Address, Company Name, GST, and Contact Name from customer message.
+    Extract structured entities from customer message text.
+    Returns only fields that are actually found — no placeholder values.
     """
-    clean_text = str(text or "").strip()
+    text = str(text or "").strip()
 
-    # 1. Email ID
-    email_pattern = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,7}\b')
-    email_match = email_pattern.search(clean_text)
-    email = email_match.group(0).lower() if email_match else ""
+    # Email
+    email_m = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,7}\b', text)
+    email = email_m.group(0).lower() if email_m else ""
 
-    # 2. GST Number
-    gst_pattern = re.compile(r'\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[A-Z\d]{1}[Z]{1}[A-Z\d]{1}\b', re.IGNORECASE)
-    gst_match = gst_pattern.search(clean_text)
-    gst = gst_match.group(0).upper() if gst_match else ""
+    # GST Number (Indian format: 15 chars)
+    gst_m = re.search(r'\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[A-Z\d]{1}Z[A-Z\d]{1}\b', text, re.IGNORECASE)
+    gst = gst_m.group(0).upper() if gst_m else ""
 
-    # 3. Contact Person Name
+    # Contact Person Name — explicit keyword patterns first
     contact_name = ""
-    name_match = re.search(r'(?:contact\s*person|person|contact|name)[\s:.-]+([a-zA-Z\s]{3,30})', clean_text, re.IGNORECASE)
-    if name_match:
-        val = name_match.group(1).strip()
-        if not any(kw in val.lower() for kw in ['company', 'enterprise', 'trader', 'gst', 'box', 'size', 'need', 'want', 'please', 'lugs', 'road']):
-            contact_name = val.title()
-
-    if not contact_name and profile_name:
+    name_m = re.search(
+        r'(?:contact\s*person|contact|person|name)\s*[:\-–]?\s*([A-Za-z](?:[A-Za-z\s]{1,28}[A-Za-z]))',
+        text, re.IGNORECASE
+    )
+    if name_m:
+        candidate = name_m.group(1).strip()
+        # Reject if it looks like a business phrase
+        if not re.search(r'\b(company|enterprise|pvt|ltd|gst|road|street|require|need|want)\b', candidate, re.IGNORECASE):
+            contact_name = candidate.title()
+    if not contact_name and profile_name and profile_name.lower() not in ("customer", "unknown"):
         contact_name = profile_name.strip().title()
 
-    # 4. Company / Business Name
+    # Company / Business Name
     company = ""
-    comp_match = re.search(r'(?:company|business|firm|shop|org|enterprise|firm\s*name)[\s:.-]+([^\n,]+)', clean_text, re.IGNORECASE)
-    if comp_match:
-        company = comp_match.group(1).strip()
-    elif re.search(r'\b(enterprise[s]?|group\s+of\s+companies|traders|trading|pvt\s*ltd|ltd|industries|packaging|boxes|store|mart|agency|agencies|corporation|solutions|works|manufacturing)\b', clean_text, re.IGNORECASE):
-        for part in re.split(r'[,;\n]', clean_text):
-            if re.search(r'\b(enterprise[s]?|group\s+of\s+companies|traders|trading|pvt\s*ltd|ltd|industries|packaging|boxes|store|mart|agency|agencies|corporation|solutions|works|manufacturing)\b', part, re.IGNORECASE):
-                if not re.search(r'\b(need|want|send|quote|price|rate|requirement)\b', part, re.IGNORECASE):
-                    company = part.strip()
+    comp_m = re.search(
+        r'(?:company|business|firm|shop|org|enterprise)\s*(?:name)?\s*[:\-–]?\s*([^\n,]{3,50})',
+        text, re.IGNORECASE
+    )
+    if comp_m:
+        company = comp_m.group(1).strip()
+    else:
+        # Heuristic: line that contains a business-type keyword
+        biz_rx = re.compile(
+            r'\b(enterprise[s]?|traders?|trading|pvt\.?\s*ltd|ltd|industries|packaging|'
+            r'corporation|solutions|works|manufacturing|group|agency|agencies)\b',
+            re.IGNORECASE
+        )
+        for line in text.splitlines():
+            line = line.strip()
+            if biz_rx.search(line) and not re.search(r'\b(need|want|send|quote|price|rate|req)\b', line, re.IGNORECASE):
+                if 3 <= len(line) <= 60:
+                    company = line
                     break
 
-    # 5. Complete Address (Gathers all road, street, building, area, city, pin code lines)
+    # Address — collect lines that look like address fragments
     addr_lines = []
-    lines = [l.strip() for l in clean_text.splitlines() if l.strip()]
-    addr_keywords = [
-        'road', 'rd', 'street', 'st', 'lane', 'gali', 'bazar', 'bazaar', 'nagar', 'colony',
-        'block', 'sector', 'floor', 'plot', 'shop', 'near', 'opp', 'opposite', 'behind',
-        'dist', 'district', 'pin', 'kolkata', 'mumbai', 'delhi', 'chennai', 'bangalore',
-        'hyderabad', 'pune', 'ahmedabad', 'surat', 'jaipur', 'lucknow', 'howrah', 'west bengal',
-        'maharashtra', 'gujarat', 'up', 'bihar'
-    ]
-
-    for line in lines:
-        line_l = line.lower()
-        if gst and gst in line.upper():
+    ADDR_KW = re.compile(
+        r'\b(road|rd|street|st\b|lane|gali|bazar|bazaar|nagar|colony|block|sector|'
+        r'floor|plot|near|opp|opposite|behind|dist|district|pin|'
+        r'kolkata|mumbai|delhi|chennai|bangalore|hyderabad|pune|ahmedabad|'
+        r'surat|jaipur|lucknow|howrah|bengal|maharashtra|gujarat|pradesh)\b',
+        re.IGNORECASE
+    )
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
             continue
-        if email and email in line_l:
+        if gst and gst.lower() in line.lower():
             continue
-        if company and line.strip().lower() == company.lower():
+        if email and email in line.lower():
             continue
-        if any(kw in line_l for kw in addr_keywords) or re.search(r'\b\d{6}\b', line):
-            cleaned = re.sub(r'^(?:address|location|addr|office)[\s:.-]+', '', line, flags=re.IGNORECASE).strip()
+        if company and line.lower() == company.lower():
+            continue
+        if ADDR_KW.search(line) or re.search(r'\b\d{6}\b', line):
+            cleaned = re.sub(r'^(?:address|location|addr|office)\s*[:\-–]?\s*', '', line, flags=re.IGNORECASE).strip()
             if cleaned and cleaned not in addr_lines:
                 addr_lines.append(cleaned)
+    address = ", ".join(addr_lines)
 
-    complete_address = ", ".join(addr_lines) if addr_lines else ""
-
-    # Fallback for business step: if company still missing, check first non-metadata, non-chatter line
-    chatter_words = {
-        'ok', 'okay', 'thanks', 'thank you', 'call me', 'hi', 'hello', 'hey', 'yes', 'no',
-        'fine', 'good', 'sure', 'send', 'please', 'ok thanks', 'k', 'alright', 'done'
-    }
+    # For business step: if company still empty, try first substantive non-chatter line
     if is_business_step and not company:
-        for line in lines:
-            line_clean = line.strip().lower()
-            if gst_pattern.search(line) or (email and email in line_clean):
+        CHATTER = {"ok","okay","thanks","thank you","hi","hello","hey","yes","no",
+                   "fine","good","sure","k","alright","done","noted"}
+        for line in text.splitlines():
+            line_clean = line.strip()
+            if not line_clean or line_clean.lower() in CHATTER:
                 continue
-            if line_clean in chatter_words:
+            if gst_m and gst in line_clean:
                 continue
-            if not any(kw in line_clean for kw in ['pin', 'kolkata', 'delhi', 'mumbai', 'phone', 'contact', 'gst', 'www', 'http', 'road', 'street', 'bazar', 'call', 'reply', 'send']):
-                if 2 <= len(line.strip()) < 60 and len(line.split()) >= 1:
-                    company = line.strip()
-                    break
+            if email and email in line_clean.lower():
+                continue
+            if re.search(r'\b(pin|road|street|gst|www|http|call|reply|send)\b', line_clean, re.IGNORECASE):
+                continue
+            if 3 <= len(line_clean) <= 60:
+                company = line_clean
+                break
 
     return {
-        "email": email,
+        "email":   email,
         "company": company,
-        "gst": gst,
-        "address": complete_address,
+        "gst":     gst,
+        "address": address,
         "contact": contact_name,
     }
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# WORKBOOK HELPERS
+# ──────────────────────────────────────────────────────────────────────────────
 
 def _get_or_create_workbook(file_path: str) -> openpyxl.Workbook:
     os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
@@ -187,7 +214,7 @@ def _get_or_create_workbook(file_path: str) -> openpyxl.Workbook:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Customer Leads"
-    ws.views.sheetView[0].showGridLines = True
+    ws.freeze_panes = "A2"
 
     for col_idx, (header, width) in enumerate(zip(HEADERS, WIDTHS), start=1):
         cell = ws.cell(row=1, column=col_idx, value=header)
@@ -197,10 +224,98 @@ def _get_or_create_workbook(file_path: str) -> openpyxl.Workbook:
         cell.border = THIN_BORDER
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
-    ws.row_dimensions[1].height = 32
-    ws.freeze_panes = "A2"
+    ws.row_dimensions[1].height = 30
     return wb
 
+
+def _apply_lead_to_workbook(file_path: str, lead: dict) -> bool:
+    """Write or update a customer lead row. Only fills columns that have new data."""
+    wb = _get_or_create_workbook(file_path)
+    ws = wb["Customer Leads"] if "Customer Leads" in wb.sheetnames else wb.active
+
+    phone        = lead.get("phone", "")
+    timestamp    = lead.get("timestamp", "")
+    contact_name = lead.get("contact_name", "")
+    email        = lead.get("email", "")
+    company      = lead.get("company", "")
+    gst          = lead.get("gst", "")
+    address      = lead.get("address", "")
+    requirements = lead.get("requirements", "")
+
+    align_c = Alignment(horizontal="center", vertical="center")
+    align_l = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+    # Find existing row for this phone number
+    match_row = None
+    first_empty = None
+    lead_count = 0
+
+    for r in range(2, ws.max_row + 2):
+        cell_val = ws.cell(row=r, column=5).value
+        if cell_val:
+            lead_count += 1
+            if str(cell_val).strip() == str(phone).strip():
+                match_row = r
+                break
+        elif first_empty is None:
+            first_empty = r
+
+    if match_row:
+        # Update existing row: only overwrite blank cells
+        ws.cell(row=match_row, column=3, value=timestamp)  # always update last contact
+
+        def _fill(col, new_val):
+            if new_val:
+                existing = ws.cell(row=match_row, column=col).value
+                if not existing or str(existing).strip() in ("", "—", "-"):
+                    ws.cell(row=match_row, column=col, value=new_val)
+
+        _fill(4, contact_name)
+        _fill(6, email)
+        _fill(7, company)
+        _fill(8, gst)
+        _fill(9, address)
+
+        # Requirements: accumulate (append new content)
+        if requirements:
+            existing_req = str(ws.cell(row=match_row, column=10).value or "").strip()
+            if not existing_req or existing_req in ("—", "-"):
+                ws.cell(row=match_row, column=10, value=requirements)
+            else:
+                # Only append if genuinely new information
+                if requirements.lower().strip() not in existing_req.lower():
+                    ws.cell(row=match_row, column=10, value=existing_req + "\n" + requirements)
+
+    else:
+        # New customer row
+        new_row = first_empty if first_empty else (ws.max_row + 1)
+        row_values = [
+            lead_count + 1,   # S.No.
+            timestamp,        # First Contact
+            timestamp,        # Last Contact
+            contact_name,     # Contact Name (blank if unknown)
+            phone,            # WhatsApp Number
+            email,            # Email
+            company,          # Company
+            gst,              # GST
+            address,          # Address
+            requirements,     # Requirements
+        ]
+        for col_idx, val in enumerate(row_values, start=1):
+            cell = ws.cell(row=new_row, column=col_idx, value=val if val else None)
+            cell.font = DATA_FONT
+            cell.border = THIN_BORDER
+            cell.alignment = align_c if col_idx in (1, 2, 3, 5) else align_l
+
+        ws.row_dimensions[new_row].height = 25
+
+    wb.save(file_path)
+    return True
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# QUEUE (for when Excel file is open/locked)
+# ──────────────────────────────────────────────────────────────────────────────
 
 def _load_queue() -> list:
     if os.path.exists(QUEUE_FILE):
@@ -221,175 +336,90 @@ def _save_queue(queue: list) -> None:
         pass
 
 
-def _apply_lead_to_workbook(file_path: str, lead_data: dict) -> bool:
-    wb = _get_or_create_workbook(file_path)
-    ws = wb["Customer Leads"] if "Customer Leads" in wb.sheetnames else wb.active
-
-    phone = lead_data.get("phone", "")
-    timestamp = lead_data.get("timestamp", "")
-    contact_name = lead_data.get("contact_name", "")
-    email = lead_data.get("email", "")
-    company = lead_data.get("company", "")
-    gst = lead_data.get("gst", "")
-    address = lead_data.get("address", "")
-    requirements = lead_data.get("requirements", "")
-
-    match_row = None
-    first_empty_row = None
-    existing_leads_count = 0
-
-    for r in range(2, ws.max_row + 1):
-        existing_phone = ws.cell(row=r, column=5).value
-        if existing_phone:
-            existing_leads_count += 1
-            if existing_phone == phone:
-                match_row = r
-                break
-        elif first_empty_row is None:
-            first_empty_row = r
-
-    align_center = Alignment(horizontal="center", vertical="center")
-    align_left = Alignment(horizontal="left", vertical="center", wrap_text=True)
-
-    if match_row:
-        # Col 3: Last Contact Date
-        ws.cell(row=match_row, column=3, value=timestamp)
-
-        if contact_name and contact_name != "Unknown Customer":
-            ws.cell(row=match_row, column=4, value=contact_name)
-        if email:
-            ws.cell(row=match_row, column=6, value=email)
-        if company:
-            ws.cell(row=match_row, column=7, value=company)
-        if gst:
-            ws.cell(row=match_row, column=8, value=gst)
-        if address:
-            ws.cell(row=match_row, column=9, value=address)
-        if requirements:
-            prev_req = str(ws.cell(row=match_row, column=10).value or "").strip()
-            if prev_req and prev_req != "—":
-                new_lines = [l.strip() for l in requirements.splitlines() if l.strip()]
-                prev_lower = prev_req.lower()
-                to_add = [l for l in new_lines if l.lower() not in prev_lower]
-                if to_add:
-                    combined_req = f"{prev_req}\n" + "\n".join(to_add)
-                else:
-                    combined_req = prev_req
-            else:
-                combined_req = requirements
-            ws.cell(row=match_row, column=10, value=combined_req)
-    else:
-        new_row = first_empty_row if first_empty_row is not None else (ws.max_row + 1)
-        s_no = existing_leads_count + 1
-        row_values = [
-            s_no,
-            timestamp,              # Col 2: First Contact Date (IST)
-            timestamp,              # Col 3: Last Contact Date (IST)
-            contact_name or "Unknown Customer", # Col 4: Contact Person Name
-            phone,                  # Col 5: WhatsApp Number
-            email or "—",           # Col 6: Email ID
-            company or "—",         # Col 7: Company / Business Name
-            gst or "—",             # Col 8: GST Number
-            address or "—",         # Col 9: Complete Address
-            requirements or "—",    # Col 10: Customer Requirements Details
-        ]
-
-        for col_idx, val in enumerate(row_values, start=1):
-            cell = ws.cell(row=new_row, column=col_idx, value=val)
-            cell.font = DATA_FONT
-            cell.border = THIN_BORDER
-            cell.alignment = align_center if col_idx in (1, 2, 3, 5, 8) else align_left
-
-        ws.row_dimensions[new_row].height = 28
-
-    wb.save(file_path)
-    return True
+def flush_pending_excel_queue():
+    """Try to write any previously queued leads (when file was locked)."""
+    with _excel_lock:
+        queue = _load_queue()
+        if not queue:
+            return
+        unflushed = []
+        flushed = 0
+        for item in queue:
+            dest, lead = (item[0], item[1]) if isinstance(item, (list, tuple)) else (EXCEL_FILE_PATH, item)
+            try:
+                _apply_lead_to_workbook(dest, lead)
+                flushed += 1
+            except PermissionError:
+                unflushed.append((dest, lead))
+            except Exception as e:
+                print(f"[EXCEL QUEUE ERROR] {e}")
+        if flushed:
+            print(f"[EXCEL SYNC] Flushed {flushed} queued lead(s) to Desktop files.")
+        _save_queue(unflushed)
 
 
-def _update_live_csv(lead_data: dict) -> None:
-    """Always maintains a live lock-free CSV copy on Desktop with 10 columns."""
+# ──────────────────────────────────────────────────────────────────────────────
+# CSV SYNC
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _update_live_csv(lead: dict) -> None:
     try:
         rows = []
         if os.path.exists(CSV_PATH):
             with open(CSV_PATH, "r", encoding="utf-8-sig", newline="") as f:
-                reader = csv.reader(f)
-                rows = list(reader)
-
+                rows = list(csv.reader(f))
         if not rows:
             rows = [HEADERS]
 
-        phone = lead_data.get("phone", "")
+        phone = lead.get("phone", "")
         match_idx = None
         for i in range(1, len(rows)):
             if len(rows[i]) > 4 and rows[i][4] == phone:
                 match_idx = i
                 break
 
+        def _safe(rows, idx, col, val):
+            while len(rows[idx]) <= col:
+                rows[idx].append("")
+            if val and not rows[idx][col]:
+                rows[idx][col] = val
+
         if match_idx is not None:
-            while len(rows[match_idx]) < 10:
-                rows[match_idx].append("—")
-            rows[match_idx][2] = lead_data.get("timestamp", "")
-            if lead_data.get("contact_name"):
-                rows[match_idx][3] = lead_data.get("contact_name")
-            if lead_data.get("email"):
-                rows[match_idx][5] = lead_data.get("email")
-            if lead_data.get("company"):
-                rows[match_idx][6] = lead_data.get("company")
-            if lead_data.get("gst"):
-                rows[match_idx][7] = lead_data.get("gst")
-            if lead_data.get("address"):
-                rows[match_idx][8] = lead_data.get("address")
-            if lead_data.get("requirements"):
-                prev = rows[match_idx][9]
-                rows[match_idx][9] = f"{prev} | {lead_data.get('requirements')}" if prev and prev != "—" else lead_data.get("requirements")
+            rows[match_idx][2] = lead.get("timestamp", "")  # Last contact
+            _safe(rows, match_idx, 3, lead.get("contact_name"))
+            _safe(rows, match_idx, 5, lead.get("email"))
+            _safe(rows, match_idx, 6, lead.get("company"))
+            _safe(rows, match_idx, 7, lead.get("gst"))
+            _safe(rows, match_idx, 8, lead.get("address"))
+            if lead.get("requirements"):
+                prev = rows[match_idx][9] if len(rows[match_idx]) > 9 else ""
+                if not prev:
+                    rows[match_idx][9] = lead["requirements"]
+                elif lead["requirements"].lower() not in prev.lower():
+                    rows[match_idx][9] = prev + " | " + lead["requirements"]
         else:
-            s_no = len(rows)
             rows.append([
-                s_no,
-                lead_data.get("timestamp", ""),
-                lead_data.get("timestamp", ""),
-                lead_data.get("contact_name") or "Unknown Customer",
+                len(rows),
+                lead.get("timestamp", ""),
+                lead.get("timestamp", ""),
+                lead.get("contact_name") or "",
                 phone,
-                lead_data.get("email") or "—",
-                lead_data.get("company") or "—",
-                lead_data.get("gst") or "—",
-                lead_data.get("address") or "—",
-                lead_data.get("requirements") or "—",
+                lead.get("email") or "",
+                lead.get("company") or "",
+                lead.get("gst") or "",
+                lead.get("address") or "",
+                lead.get("requirements") or "",
             ])
 
         with open(CSV_PATH, "w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerows(rows)
+            csv.writer(f).writerows(rows)
     except Exception as e:
         print(f"[CSV ERROR] {e}")
 
 
-def flush_pending_excel_queue():
-    with _excel_lock:
-        queue = _load_queue()
-        if not queue:
-            return
-
-        unflushed = []
-        for item in queue:
-            if isinstance(item, (list, tuple)) and len(item) == 2:
-                dest, lead = item
-            else:
-                dest, lead = EXCEL_FILE_PATH, item
-
-            try:
-                _apply_lead_to_workbook(dest, lead)
-            except PermissionError:
-                unflushed.append((dest, lead))
-            except Exception as e:
-                print(f"[EXCEL QUEUE ERROR] {e}")
-
-        if len(unflushed) < len(queue):
-            flushed_count = len(queue) - len(unflushed)
-            print(f"[EXCEL SYNC] Flushed {flushed_count} queued customer leads to Desktop files!")
-
-        _save_queue(unflushed)
-
+# ──────────────────────────────────────────────────────────────────────────────
+# PRIMARY PUBLIC API
+# ──────────────────────────────────────────────────────────────────────────────
 
 def log_customer_lead(
     sender_phone: str,
@@ -400,70 +430,70 @@ def log_customer_lead(
     is_business_step: bool = False,
 ) -> None:
     """
-    Primary function to record customer lead details.
-    Extracts Contact Name, Phone, Email, Company, GST, Complete Address, and Pure Requirements.
-    Saves to Desktop live file, Desktop shared file, live CSV, and project backup.
+    Log customer lead to all Excel/CSV files.
+    Called once per real incoming customer message (not on every loop tick).
     """
     now_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
     formatted_phone = format_phone_display(sender_phone)
 
-    # 1. Extract entities from text
     extracted = extract_lead_entities(message_text, sender_name, is_business_step=is_business_step)
 
-    # 2. Determine requirements details (Pure products only, reject chatter)
+    # Requirements: use OCR result first, then parse from text
     requirements = ""
-    if analyzed_products and not analyzed_products.startswith("No text"):
+    if analyzed_products and "No text" not in analyzed_products:
         requirements = analyzed_products
     elif message_text and not message_text.startswith("["):
         requirements = parse_product_details(message_text)
 
-    lead_data = {
-        "timestamp": now_ist,
+    # For business step: requirements not relevant (it's about biz details), don't overwrite
+    if is_business_step:
+        requirements = ""
+
+    lead = {
+        "timestamp":    now_ist,
         "contact_name": extracted["contact"],
-        "phone": formatted_phone,
-        "email": extracted["email"],
-        "company": extracted["company"],
-        "gst": extracted["gst"],
-        "address": extracted["address"],
+        "phone":        formatted_phone,
+        "email":        extracted["email"],
+        "company":      extracted["company"],
+        "gst":          extracted["gst"],
+        "address":      extracted["address"],
         "requirements": requirements,
     }
 
-    # Asynchronously push lead to cloud Google Sheets if webhook configured
+    # Cloud sync
     try:
         from cloud_sync import push_lead_to_cloud
         push_lead_to_cloud({
-            "first_contact": now_ist,
-            "last_contact": now_ist,
-            "name": extracted["contact"],
-            "phone": formatted_phone,
-            "email": extracted["email"],
-            "company": extracted["company"],
-            "gst": extracted["gst"],
-            "address": extracted["address"],
+            "first_contact": now_ist, "last_contact": now_ist,
+            "name": extracted["contact"], "phone": formatted_phone,
+            "email": extracted["email"], "company": extracted["company"],
+            "gst": extracted["gst"], "address": extracted["address"],
             "requirements": requirements,
         })
     except Exception:
         pass
 
     with _excel_lock:
-        _update_live_csv(lead_data)
+        _update_live_csv(lead)
 
+        # Backup copy
         try:
-            _apply_lead_to_workbook(BACKUP_EXCEL_PATH, lead_data)
+            _apply_lead_to_workbook(BACKUP_EXCEL_PATH, lead)
         except Exception as e:
             print(f"[EXCEL BACKUP ERROR] {e}")
 
+        # Desktop copies
         for dest in [EXCEL_FILE_PATH, SHARED_EXCEL_PATH]:
             try:
-                _apply_lead_to_workbook(dest, lead_data)
-                print(f"[EXCEL] ✅ Saved to {os.path.basename(dest)}: {lead_data['contact_name']} ({formatted_phone})")
+                _apply_lead_to_workbook(dest, lead)
+                print(f"[EXCEL] ✅ {os.path.basename(dest)}: {extracted['contact'] or sender_name} ({formatted_phone})")
             except PermissionError:
                 queue = _load_queue()
-                queue.append((dest, lead_data))
+                queue.append((dest, lead))
                 _save_queue(queue)
-                print(f"[EXCEL INFO] {os.path.basename(dest)} is currently open. Queued safely for auto-sync.")
+                print(f"[EXCEL] ⚠ {os.path.basename(dest)} is open — queued for next sync.")
             except Exception as e:
                 queue = _load_queue()
-                queue.append((dest, lead_data))
+                queue.append((dest, lead))
                 _save_queue(queue)
-                print(f"[EXCEL QUEUE] Queued: {e}")
+                print(f"[EXCEL QUEUE] {e}")
