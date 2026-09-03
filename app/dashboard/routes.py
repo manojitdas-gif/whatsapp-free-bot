@@ -55,11 +55,11 @@ async def get_customer_messages(customer_id: int, db: Session = Depends(get_db))
 @router.get("/export/excel")
 async def export_excel_download():
     """Download on-demand the latest 9-column Excel file."""
-    path = settings.SHARED_EXCEL_PATH if os.path.exists(settings.SHARED_EXCEL_PATH) else settings.EXCEL_EXPORT_PATH
+    path = settings.EXCEL_EXPORT_PATH if os.path.exists(settings.EXCEL_EXPORT_PATH) else settings.SHARED_EXCEL_PATH
     if os.path.exists(path):
         return FileResponse(
             path,
-            filename="WhatsApp_Electrical_Leads.xlsx",
+            filename="WhatsApp_Conversations.xlsx",
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     return {"error": "Excel file not generated yet."}
