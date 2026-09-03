@@ -114,7 +114,15 @@ COMPANY_INDICATORS = [
 IGNORE_UI_PHRASES = (
     "not a contact", "no common groups", "common groups", "click here",
     "online", "typing", "last seen", "message yourself", "messages and calls",
-    "end-to-end", "encrypted", "disappearing", "mute notifications"
+    "end-to-end", "encrypted", "disappearing", "mute notifications", "business account",
+    "account", "customer"
+)
+
+CHAT_CHATTER_PHRASES = (
+    "download", "attached", ".xlsx", ".pdf", ".png", ".jpg", "document", "photo", "image",
+    "needed", "costly", "delivery is", "acha", "wala", "hoga", "kardo", "bhejo", "kya", "hai",
+    "please share", "quotation", "rate", "price", "batao", "kaise", "kab tak", "brand preference",
+    "regret", "delivery", "sir", "bhaiya", "ok sir"
 )
 
 def extract_company_name(text: str) -> Optional[str]:
@@ -125,43 +133,44 @@ def extract_company_name(text: str) -> Optional[str]:
     for line in text.splitlines():
         line_clean = line.strip()
         lower = line_clean.lower()
-        if any(lower.startswith(prefix) for prefix in ("company:", "business:", "firm:", "shop:", "company name:", "firm name:")):
-            clean = re.sub(r'^(?:company name|firm name|company|business|firm|shop)[\s:-]+', '', line_clean, flags=re.IGNORECASE).strip()
-            if len(clean) >= 2 and not any(p in clean.lower() for p in IGNORE_UI_PHRASES):
+        if any(lower.startswith(prefix) for prefix in ("company:", "business:", "firm:", "shop:", "company name:", "firm name:", "m/s:", "m/s ")):
+            clean = re.sub(r'^(?:company name|firm name|company|business|firm|shop|m/s)[\s:-]+', '', line_clean, flags=re.IGNORECASE).strip()
+            if len(clean) >= 3 and len(clean) <= 60 and not any(p in clean.lower() for p in IGNORE_UI_PHRASES) and not any(p in clean.lower() for p in CHAT_CHATTER_PHRASES):
                 return clean.title()
 
     # 2. Pattern: from <Company> or at <Company>
     from_m = re.search(
-        r'\b(?:from|at)\s+([A-Za-z0-9\s&]+?(?:electricals|electric|enterprises|traders|trading|industries|corp|corporation|agency|agencies|co|company|hardware|store|shop|solutions|limited|ltd|pvt ltd|llp))\b',
+        r'\b(?:from|at)\s+([A-Za-z0-9\s&]{3,40}?(?:electricals|electric|enterprises|traders|trading|industries|corp|corporation|agency|agencies|hardware|store|solutions|limited|ltd|pvt ltd|llp))\b',
         text,
         re.IGNORECASE
     )
     if from_m:
         cand = from_m.group(1).strip()
-        if not any(p in cand.lower() for p in IGNORE_UI_PHRASES):
+        cand_l = cand.lower()
+        if not any(p in cand_l for p in IGNORE_UI_PHRASES) and not any(p in cand_l for p in CHAT_CHATTER_PHRASES):
             return cand.title()
 
-    # 3. Line scan with indicator
+    # 3. Line scan with strict indicator
     for line in text.splitlines():
         line_clean = line.strip()
         lower = line_clean.lower()
-        if any(p in lower for p in IGNORE_UI_PHRASES):
+        if any(p in lower for p in IGNORE_UI_PHRASES) or any(p in lower for p in CHAT_CHATTER_PHRASES):
             continue
-        # Exclude pure wattages or quantities
-        if re.match(r'^\d+\s*(?:watt|w|pcs|pc|mtr|meter|m)\b', lower):
+        if "?" in line_clean:
             continue
-        if any(ind in lower for ind in COMPANY_INDICATORS) and len(line_clean) < 80:
-            # Exclude lines that are clearly product orders
-            if any(p in lower for p in ("bulb", "mcb", "wire", "cable", "quotation for", "invoice")):
-                continue
+        # Exclude pure wattages or quantities or simple messages
+        if re.match(r'^\d+\s*(?:watt|w|pcs|pc|mtr|meter|m|nos|no)\b', lower):
+            continue
+        if any(ind in lower for ind in ("electricals", "electric", "enterprises", "traders", "industries", "pvt ltd", "ltd", "corporation", "hardware store")) and len(line_clean) < 60:
             clean = re.sub(r'^(?:company|business|firm|shop|org|name)[\s:-]+', '', line_clean, flags=re.IGNORECASE).strip()
-            if len(clean) >= 3 and not any(p in clean.lower() for p in IGNORE_UI_PHRASES):
+            if len(clean) >= 3 and not any(p in clean.lower() for p in IGNORE_UI_PHRASES) and not any(p in clean.lower() for p in CHAT_CHATTER_PHRASES):
                 return clean.title()
     return None
 
 # ── 5. COMPLETE ADDRESS EXTRACTION ────────────────────────────────────────────
 PIN_CODE_REGEX = re.compile(r'\b[1-9][0-9]{5}\b')
-ADDRESS_KEYWORDS = ["road", "street", "lane", "bazaar", "bazar", "market", "floor", "near", "opposite", "opp", "beside", "dist", "district", "city", "state", "pin", "kolkata", "delhi", "mumbai", "chennai", "bangalore", "hyderabad", "pune", "ahmedabad", "jaipur", "patna", "bengal", "up", "bihar", "odisha"]
+STREET_MARKERS = ("road", "rd", "street", "st", "lane", "gali", "marg", "bazaar", "bazar", "market", "floor", "nagar", "chowk", "complex", "sector", "plot", "park", "industrial area", "industrial areea", "building", "opp", "opposite", "near", "beside")
+CITY_MARKERS = ("kolkata", "delhi", "mumbai", "chennai", "bangalore", "hyderabad", "pune", "ahmedabad", "jaipur", "patna", "bengal", "burrabazar", "patliputra", "pirangut")
 
 def extract_address(text: str) -> Optional[str]:
     if not text:
@@ -171,45 +180,61 @@ def extract_address(text: str) -> Optional[str]:
     
     for line in lines:
         lower = line.lower()
+        # Reject questions, chat chatter, and UI noise immediately
+        if "?" in line or any(p in lower for p in IGNORE_UI_PHRASES) or any(p in lower for p in CHAT_CHATTER_PHRASES):
+            continue
+
         has_pin = bool(PIN_CODE_REGEX.search(line))
-        has_addr_word = any(kw in lower for kw in ADDRESS_KEYWORDS)
-        is_explicit_label = any(lower.startswith(prefix) for prefix in ("address:", "loc:", "location:", "addr:", "shop address:"))
+        has_street = any(sm in lower for sm in STREET_MARKERS)
+        has_city = any(cm in lower for cm in CITY_MARKERS)
+        is_explicit_label = any(lower.startswith(prefix) for prefix in ("address:", "loc:", "location:", "addr:", "shop address:", "office address:", "delivery address:"))
         
         if is_explicit_label:
-            clean = re.sub(r'^(?:address|location|loc|addr|shop address)[\s:-]+', '', line, flags=re.IGNORECASE).strip()
-            return clean
+            clean = re.sub(r'^(?:address|location|loc|addr|shop address|office address|delivery address)[\s:-]+', '', line, flags=re.IGNORECASE).strip()
+            if len(clean) >= 5 and "?" not in clean:
+                return clean
 
-        if has_pin or (has_addr_word and len(line) > 8):
-            # Exclude lines that are clearly product lines
-            if not any(pk in lower for pk in ("bulb", "mcb", "wire", "cable", "fan", "switch")):
-                matched_address_parts.append(line)
+        # Legitimate address line: has pin code OR has premise marker + city marker
+        if has_pin or (has_street and has_city and len(line) >= 12):
+            # Exclude lines that are purely product orders or short chatter
+            if not any(pk in lower for pk in ("bulb", "mcb", "wire", "cable", "fan", "switch", "watt", "pcs")):
+                clean_line = line.replace('\r', '').strip()
+                # If line is an intro like 'Hi, I am Debashis from Bengal Electricals, 12 Park St, Kolkata', isolate address
+                snippet_m = re.search(r'(\d+[\s\w,.-]+(?:st|street|road|rd|lane|nagar|park|bazar|market)[\s\w,.-]*(?:kolkata|delhi|mumbai|chennai|bangalore|pune|patna|bengal|pirangut)\b)', clean_line, re.IGNORECASE)
+                if snippet_m:
+                    clean_line = snippet_m.group(1).strip()
+                elif has_street and "," in clean_line:
+                    parts = [p.strip() for p in clean_line.split(",") if any(sm in p.lower() for sm in STREET_MARKERS) or any(cm in p.lower() for cm in CITY_MARKERS) or PIN_CODE_REGEX.search(p)]
+                    if parts:
+                        clean_line = ", ".join(parts)
+
+                if clean_line and clean_line not in matched_address_parts:
+                    matched_address_parts.append(clean_line)
 
     if matched_address_parts:
+        # Return clean address without duplicate commas
         return ", ".join(matched_address_parts)
     return None
 
 # ── 6. CONTACT PERSON NAME EXTRACTION ─────────────────────────────────────────
 def extract_contact_name(text: str, profile_name: Optional[str] = None) -> Optional[str]:
-    # Check if profile name is already provided from WhatsApp profile
-    if profile_name and not any(p in profile_name.lower() for p in IGNORE_UI_PHRASES):
-        clean_prof = profile_name.strip()
-        if len(clean_prof) >= 2 and not clean_prof.replace('+', '').replace(' ', '').isdigit():
-            return clean_prof.title()
+    # Check if profile name is provided from WhatsApp profile and is a valid personal name
+    if profile_name:
+        clean_p = profile_name.strip()
+        lower_p = clean_p.lower()
+        if not any(p in lower_p for p in IGNORE_UI_PHRASES) and not any(p in lower_p for p in CHAT_CHATTER_PHRASES):
+            if len(clean_p) >= 2 and len(clean_p) <= 30 and not clean_p.replace('+', '').replace(' ', '').isdigit():
+                return clean_p.title()
 
     if not text:
         return None
     
-    # 1. Pattern: I am <Name> from ... or My name is <Name>
-    m = re.search(r'\b(?:my name is|i am|this is|contact person|contact|name is)[\s:-]+([A-Za-z]{2,20})(?:\s+from|\s*,|\s*$|\s*\n)', text, re.IGNORECASE)
+    # Explicit pattern: I am <Name> from ... or My name is <Name> or Contact Person: <Name>
+    m = re.search(r'\b(?:my name is|i am|this is|contact person|contact person name|contact name)[\s:-]+([A-Za-z\s]{2,30})(?:\s+from|\s*,|\s*$|\s*\n)', text, re.IGNORECASE)
     if m:
         candidate = m.group(1).strip()
-        if candidate.lower() not in ("here", "interested", "need", "we", "hi") and not any(p in candidate.lower() for p in IGNORE_UI_PHRASES):
-            return candidate.title()
-
-    m2 = re.search(r'\b(?:my name is|i am|this is|contact person|contact|name is)[\s:-]+([A-Za-z\s]{2,25})\b', text, re.IGNORECASE)
-    if m2:
-        candidate = m2.group(1).strip()
-        if candidate.lower() not in ("here", "interested", "need") and not any(p in candidate.lower() for p in IGNORE_UI_PHRASES):
+        cand_l = candidate.lower()
+        if cand_l not in ("here", "interested", "need", "we", "hi", "sir") and not any(p in cand_l for p in IGNORE_UI_PHRASES) and not any(p in cand_l for p in CHAT_CHATTER_PHRASES):
             return candidate.title()
         
     return None
