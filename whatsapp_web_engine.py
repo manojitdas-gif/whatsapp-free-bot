@@ -29,6 +29,7 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
 from playwright.async_api import async_playwright
 
 from app.config import settings
+from app.schemas.extraction import ExtractionResult
 from app.ai.extractor import analyze_conversation
 from app.conversation.decision_engine import evaluate_conversation_completeness
 from app.conversation.templates import RESPONSE_1, RESPONSE_2, RESPONSE_3, get_response_template
