@@ -427,12 +427,29 @@ async def process_active_chat(page) -> None:
         if extraction.complete_address:
             customer.complete_address = extraction.complete_address
 
-        req_summary = extraction.format_requirements_summary()
-        if req_summary:
+        # Check if customer already completed the primary flow
+        is_already_completed = (_last_sent_response.get(phone) == "RESPONSE_1")
+        if not is_already_completed:
+            completed_conv = db.query(Conversation).filter(
+                Conversation.customer_id == customer.id,
+                Conversation.status == ConversationStatus.COMPLETED.value
+            ).first()
+            if completed_conv:
+                is_already_completed = True
+
+        # Extract any newly provided product details, quantities, or notes
+        new_req = extraction.format_requirements_summary()
+        if not new_req and not _is_bot_reply(latest_msg):
+            clean_text = latest_msg.strip()
+            # Capture any additional product details, quantities, brand preferences, or delivery notes
+            if len(clean_text) > 1 and not any(clean_text.lower().startswith(p) for p in ("ok", "yes", "haa", "no", "thanks", "thank you")):
+                new_req = clean_text
+
+        if new_req:
             if not customer.requirements_summary:
-                customer.requirements_summary = req_summary
-            elif req_summary.lower() not in customer.requirements_summary.lower():
-                customer.requirements_summary = f"{customer.requirements_summary}\n{req_summary}"
+                customer.requirements_summary = new_req
+            elif new_req.lower() not in customer.requirements_summary.lower():
+                customer.requirements_summary = f"{customer.requirements_summary}\n{new_req}"
         elif has_media and not customer.requirements_summary:
             customer.requirements_summary = "[Product Photo / Document Attached]"
 
@@ -443,6 +460,15 @@ async def process_active_chat(page) -> None:
 
         customer.last_contact_at = utc_now()
         db.commit()
+
+        # Update Excel and CSV in-place immediately
+        sync_customer_to_excel(customer)
+        print(f"         📊 Synced {phone} to 9-column Excel & Database in-place!", flush=True)
+
+        # ── IF ALREADY COMPLETED: SILENT IN-PLACE UPDATE, DO NOT REPLY FURTHER ────
+        if is_already_completed:
+            print(f"         ✓ In-place updated requirements in Excel for {phone}. No further reply generated (Conversation Completed).", flush=True)
+            return
 
         # ── BUILD CUMULATIVE EXTRACTION ACROSS ALL CONVERSATION STEPS ───────────
         cumulative_extraction = ExtractionResult(
@@ -493,10 +519,6 @@ async def process_active_chat(page) -> None:
             conv.stage = ConversationStage.WAITING_FOR_CUSTOMER_DETAILS.value
 
         db.commit()
-
-        # Save to 9-column Excel & Live CSV (in-place row updates)
-        sync_customer_to_excel(customer)
-        print(f"         📊 Synced {phone} to 9-column Excel & Database!", flush=True)
 
     except Exception as e:
         print(f"[DB/EXCEL SYNC ERROR] {e}", flush=True)
