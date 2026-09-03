@@ -478,9 +478,22 @@ async def process_active_chat(page) -> None:
         new_req = extraction.format_requirements_summary()
         if not new_req and not _is_bot_reply(latest_msg):
             clean_text = latest_msg.strip()
-            # Capture any additional product details, quantities, brand preferences, or delivery notes
-            if len(clean_text) > 1 and not any(clean_text.lower().startswith(p) for p in ("ok", "yes", "haa", "no", "thanks", "thank you", "hi", "hello")):
-                new_req = clean_text
+            lower_text = clean_text.lower()
+            # STRICT FILTER: Ignore conversational remarks, deleted messages, price requests, greetings
+            if "?" not in clean_text and not any(noise in lower_text for noise in (
+                "deleted this message", "price", "rate", "costly", "batao", "bhejo",
+                "plz send", "please send", "acha", "wala", "hoga", "kardo", "kaise",
+                "hi", "hello", "hey", "namaste", "ok", "yes", "no", "thanks", "thank you"
+            )):
+                # Must contain actual electrical products or explicit units (pcs, nos, meter, watt)
+                has_product_word = any(pw in lower_text for pw in (
+                    "bulb", "lamp", "light", "led", "fan", "wire", "cable", "switch",
+                    "socket", "mcb", "mccb", "rccb", "db", "conduit", "pipe", "heater",
+                    "geyser", "starter", "motor", "contactor", "relay", "meter"
+                ))
+                has_unit_word = bool(re.search(r'\b\d+\s*(?:pcs|pc|nos|no|meter|mtr|m|watt|w|inch|mm)\b', lower_text))
+                if has_product_word or has_unit_word:
+                    new_req = clean_text
 
         if new_req:
             if not customer.requirements_summary:
@@ -506,6 +519,14 @@ async def process_active_chat(page) -> None:
         if is_already_completed:
             print(f"         ✓ In-place updated requirements in Excel for {phone}. No further reply generated (Conversation Completed).", flush=True)
             return
+
+        # Fetch active or latest conversation record to check previous stage
+        conv = (
+            db.query(Conversation)
+            .filter(Conversation.customer_id == customer.id)
+            .order_by(Conversation.id.desc())
+            .first()
+        )
 
         # ── GREETING CHECK: GREETINGS ALWAYS TRIGGER RESPONSE_2 (REQUIREMENT REQUEST) ─
         clean_msg = latest_msg.strip().lower()
@@ -536,9 +557,17 @@ async def process_active_chat(page) -> None:
             )
             reply_text = get_response_template(response_type)
 
-        # Do not repeat identical response if no new details were provided
-        if _last_sent_response.get(phone) == response_type and not new_req:
-            print(f"         ℹ️ {response_type} already sent to {phone} and no new info received. Skipping duplicate reply.", flush=True)
+        # ── SINGLE-REPLY ENFORCEMENT: Never repeat the same response stage to the same customer ──
+        last_sent = _last_sent_response.get(phone)
+        existing_stage = conv.stage if conv else None
+        if (last_sent == response_type) or (
+            response_type == "RESPONSE_3" and existing_stage == ConversationStage.WAITING_FOR_CUSTOMER_DETAILS.value
+        ) or (
+            response_type == "RESPONSE_2" and existing_stage == ConversationStage.WAITING_FOR_PRODUCT_REQUIREMENTS.value
+        ) or (
+            response_type == "RESPONSE_1" and (existing_stage == ConversationStage.COMPLETED.value or is_already_completed)
+        ):
+            print(f"         ℹ️ [SILENCE] {response_type} was already sent to {phone}. Skipping repeated reply.", flush=True)
             return
 
         # ── SEND EXACT PRIMARY RESPONSE ───────────────────────────────────────
