@@ -396,25 +396,14 @@ async def process_active_chat(page) -> None:
         profile_name=name if name != "Customer" else None
     )
 
-    # ── DECISION ENGINE: EVALUATE COMPLETENESS & SELECT RESPONSE ───────────────
-    response_type, audit_meta = evaluate_conversation_completeness(extraction, has_media=has_media)
-    reply_text = get_response_template(response_type)
-
-    # ── SEND EXACT PRIMARY RESPONSE ───────────────────────────────────────────
-    await asyncio.sleep(REPLY_WAIT_S)
-    success = await send_reply(page, reply_text)
-    if success:
-        _last_sent_response[phone] = response_type
-        print(f"         ✅ Sent {response_type} to {phone}!", flush=True)
-
-    # ── DATABASE & 9-COLUMN EXCEL SYNCHRONIZATION ───────────────────────────────
+    # ── DATABASE & CUMULATIVE CUSTOMER RECORD SYNCHRONIZATION ──────────────────
     db = SessionLocal()
     try:
         customer = db.query(Customer).filter(Customer.whatsapp_number == phone).first()
         if not customer:
             customer = Customer(
                 whatsapp_number=phone,
-                contact_person_name=extraction.contact_person_name or name,
+                contact_person_name=name or "",
                 first_contact_at=utc_now(),
                 last_contact_at=utc_now()
             )
@@ -422,13 +411,12 @@ async def process_active_chat(page) -> None:
             db.commit()
             db.refresh(customer)
 
-        # Priority: 1. Profile / extracted contact name, 2. Company name fallback
-        contact_person = extraction.contact_person_name or name
-        if not contact_person or contact_person.lower() in ("customer", "none", ""):
-            contact_person = extraction.company_business_name or ""
-        
-        if contact_person:
-            customer.contact_person_name = contact_person
+        # Merge new extraction fields into cumulative customer record
+        if extraction.contact_person_name:
+            customer.contact_person_name = extraction.contact_person_name
+        elif not customer.contact_person_name and name:
+            customer.contact_person_name = name
+
         if extraction.email_id:
             customer.email = extraction.email_id
         if extraction.company_business_name:
@@ -440,10 +428,46 @@ async def process_active_chat(page) -> None:
 
         req_summary = extraction.format_requirements_summary()
         if req_summary:
-            customer.requirements_summary = req_summary
+            if not customer.requirements_summary:
+                customer.requirements_summary = req_summary
+            elif req_summary.lower() not in customer.requirements_summary.lower():
+                customer.requirements_summary = f"{customer.requirements_summary}\n{req_summary}"
+        elif has_media and not customer.requirements_summary:
+            customer.requirements_summary = "[Product Photo / Document Attached]"
+
+        # Apply rule: Contact person fallback to Company Name
+        if not customer.contact_person_name or customer.contact_person_name.lower() in ("customer", "none", ""):
+            if customer.company_name:
+                customer.contact_person_name = customer.company_name
 
         customer.last_contact_at = utc_now()
         db.commit()
+
+        # ── BUILD CUMULATIVE EXTRACTION ACROSS ALL CONVERSATION STEPS ───────────
+        cumulative_extraction = ExtractionResult(
+            contact_person_name=customer.contact_person_name,
+            email_id=customer.email,
+            company_business_name=customer.company_name,
+            gst_number=customer.gst_number,
+            complete_address=customer.complete_address,
+            product_requirements=extraction.product_requirements,
+            raw_requirement_text=customer.requirements_summary
+        )
+        has_cumulative_media = has_media or bool(customer.requirements_summary)
+
+        # ── DECISION ENGINE: EVALUATE CUMULATIVE COMPLETENESS ───────────────────
+        response_type, audit_meta = evaluate_conversation_completeness(
+            cumulative_extraction, 
+            has_media=has_cumulative_media
+        )
+        reply_text = get_response_template(response_type)
+
+        # ── SEND EXACT PRIMARY RESPONSE ───────────────────────────────────────
+        await asyncio.sleep(REPLY_WAIT_S)
+        success = await send_reply(page, reply_text)
+        if success:
+            _last_sent_response[phone] = response_type
+            print(f"         ✅ Sent {response_type} to {phone}!", flush=True)
 
         # Update Conversation Stage
         conv = (
