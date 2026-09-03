@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: whatsapp_app
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      - ENVIRONMENT=production
+      - PORT=8080
+      - DATABASE_URL=postgresql://whatsapp_user:whatsapp_secure_pass@db:5432/whatsapp_db
+      - WHATSAPP_PROVIDER=meta_cloud
+      - WHATSAPP_API_URL=https://graph.facebook.com/v19.0
+      - WHATSAPP_ACCESS_TOKEN=${WHATSAPP_ACCESS_TOKEN}
+      - WHATSAPP_PHONE_NUMBER_ID=${WHATSAPP_PHONE_NUMBER_ID}
+      - WEBHOOK_VERIFY_TOKEN=${WEBHOOK_VERIFY_TOKEN:-whatsapp_verify_token_2026}
+      - DEBOUNCE_SECONDS=1.5
+      - TIMEZONE=Asia/Kolkata
+    depends_on:
+      - db
+    volumes:
+      - ../data:/app/data
+
+  db:
+    image: postgres:16-alpine
+    container_name: whatsapp_postgres
+    restart: always
+    environment:
+      - POSTGRES_USER=whatsapp_user
+      - POSTGRES_PASSWORD=whatsapp_secure_pass
+      - POSTGRES_DB=whatsapp_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
