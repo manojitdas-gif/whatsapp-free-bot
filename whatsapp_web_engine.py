@@ -2,27 +2,36 @@
 whatsapp_web_engine.py — 100% Free 24/7 WhatsApp Bot Engine.
 
 FULL FLOW:
-  1. Customer sends first message (anything)
-     → Bot waits 2 seconds → sends Step 1 reply (ask requirements + photo)
+  1. Customer sends first message (any text, photo, file, document)
+     → Bot waits 2s → sends Step 1 reply (ask requirements + photo)
 
-  2. Customer shares requirements/photos/documents
-     → Bot waits until customer STOPS typing (2s silence)
-     → VALIDATES: did customer actually share product requirements?
+  2. Customer shares requirements (text/photos/documents/PDFs/Excel/Word/anything)
+     → Bot waits until customer STOPS for 2s (stop-typing detection)
+     → VALIDATES: did customer share product requirements?
        ✓ YES → waits 2s → sends Step 2 reply (ask business details)
-       ✗ NO  → waits 2s → sends polite retry: "please share your requirements"
+       ✗ NO  → sends polite retry: "please share your requirements"
 
-  3. Customer shares business details (name, GST, address, contact)
-     → Bot waits until customer STOPS typing (2s silence)
-     → VALIDATES: did customer share business details?
-       ✓ YES → waits 2s → sends Step 3 reply (thank you, team will connect)
-       ✗ NO  → waits 2s → sends polite retry: "please share business details"
+  3. Customer shares business details (name, GST, address, contact — any format)
+     → Bot waits until customer STOPS for 2s
+     → VALIDATES: did customer share business info?
+       ✓ YES → sends Step 3 reply (thank you, team will connect)
+       ✗ NO  → sends polite retry: "please share your business details"
 
   4. DONE — bot logs silently, no more automated replies.
 
+MEDIA HANDLING:
+  - All customer images, photos, screenshots → OCR text extraction
+  - PDF, Word, Excel, CSV files → text extraction
+  - Multiple files supported per message (all collected)
+
+EXCEL LOGGING (8 columns only):
+  First Contact Date | Last Contact Date | Contact Name | WhatsApp Number
+  | Email ID | Company/Business Name | GST Number | Complete Address
+
 DEDUPLICATION:
-  - Each phone number's last processed message is tracked.
-  - The bot never replies twice to the same message.
-  - Excel is written ONCE per real new message, not on every loop tick.
+  - Each phone's last processed message is tracked in memory
+  - Bot never replies twice to the same message
+  - Bot NEVER processes its own sent messages
 """
 
 import os
@@ -30,6 +39,7 @@ import sys
 import re
 import time
 import asyncio
+import tempfile
 from datetime import datetime, timezone, timedelta
 
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
@@ -43,7 +53,6 @@ from playwright.async_api import async_playwright
 from conversation_flow import (
     register_customer_incoming_message,
     record_customer_message_time,
-    has_customer_stopped_typing,
     mark_bot_reply_sent,
     get_step_message,
     get_retry_message,
@@ -51,10 +60,10 @@ from conversation_flow import (
     validate_step2_reply,
 )
 from excel_logger import log_customer_lead, flush_pending_excel_queue
-from document_analyzer import parse_product_details, analyze_file
+from document_analyzer import analyze_file, run_image_ocr
 
 IST = timezone(timedelta(hours=5, minutes=30))
-BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 SESSION_DIR = os.path.join(BASE_DIR, "data", "whatsapp_web_profile")
 FILES_DIR   = os.path.join(BASE_DIR, "data", "customer_files")
 QR_IMAGE_PATH = os.path.join(os.path.expanduser("~"), "Desktop", "SCAN_WHATSAPP_QR.png")
@@ -63,13 +72,28 @@ os.makedirs(SESSION_DIR, exist_ok=True)
 os.makedirs(FILES_DIR, exist_ok=True)
 
 # ── TIMING CONFIG ──────────────────────────────────────────────────────────────
-STEP1_DELAY_S  = 2.0   # Wait 2s after first message → send Step 1
-TYPING_WAIT_S  = 2.0   # Wait 2s of silence → treat as "stopped typing"
-STEP_REPLY_DELAY_S = 2.0  # After stop-typing detected → wait 2s → send reply
+STEP1_DELAY_S      = 2.0   # Wait 2s after first message → send Step 1
+TYPING_SILENCE_S   = 2.0   # Silence duration = "customer stopped typing"
+REPLY_DELAY_S      = 2.0   # After silence detected → wait 2s → send reply
 
-# ── DEDUPLICATION — track last processed message per phone ────────────────────
-# { phone: {"text": str, "timestamp": float, "pending_reply": bool} }
+# ── DEDUPLICATION — last seen message per phone ────────────────────────────────
+# { phone: {"text": str, "arrived_at": float} }
 _last_seen: dict = {}
+
+# ── BOT OWN REPLY PREFIXES — filter these out from incoming detection ──────────
+BOT_REPLY_PREFIXES = (
+    "🙏 *Thank you for contacting us!",
+    "✅ *Thank you for sharing your requirements!",
+    "🙏 *Thanks for sharing all the details!",
+    "🙏 *Thank you for sharing all your details!",
+    "📋 *Please share your product requirements!",
+    "🏢 *Please share your business details!",
+    "Thank you for contacting us",
+    "Thank you for sharing your requirements",
+    "Thanks for sharing all the details",
+    "Please share your product requirements",
+    "Please share your business details",
+)
 
 
 def _start_cloud_health_server():
@@ -105,6 +129,12 @@ def sanitize_phone(raw: str) -> str:
     return c
 
 
+def _is_bot_reply(text: str) -> bool:
+    """Returns True if text looks like one of the bot's own replies."""
+    t = text.strip()
+    return any(t.startswith(p[:25]) for p in BOT_REPLY_PREFIXES)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # LOGIN HANDLER
 # ──────────────────────────────────────────────────────────────────────────────
@@ -116,7 +146,7 @@ async def wait_for_login(page) -> bool:
     while True:
         attempt += 1
         if await page.query_selector('div[id="pane-side"]'):
-            print("[SESSION] ✅ Logged in and ready!", flush=True)
+            print("[SESSION] ✅ Logged in!", flush=True)
             if os.path.exists(QR_IMAGE_PATH):
                 try: os.remove(QR_IMAGE_PATH)
                 except Exception: pass
@@ -141,12 +171,12 @@ async def wait_for_login(page) -> bool:
                 except Exception:
                     pass
                 if not qr_saved:
-                    print(f"[QR] 📱 Please scan the QR code! Saved to Desktop: {os.path.basename(QR_IMAGE_PATH)}", flush=True)
+                    print(f"[QR] 📱 Please scan QR → saved to Desktop: {os.path.basename(QR_IMAGE_PATH)}", flush=True)
                     qr_saved = True
             except Exception:
                 pass
 
-        if attempt > 150:  # 5 minute timeout
+        if attempt > 150:
             return False
         await asyncio.sleep(2)
 
@@ -156,9 +186,7 @@ async def wait_for_login(page) -> bool:
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def send_reply(page, text: str) -> bool:
-    """Types and sends a WhatsApp message in the currently open chat."""
     try:
-        # Find the message input composer
         input_box = None
         for _ in range(20):
             input_box = (
@@ -183,7 +211,6 @@ async def send_reply(page, text: str) -> bool:
         await input_box.click(force=True)
         await asyncio.sleep(0.3)
 
-        # Type multi-line message (Shift+Enter for new lines)
         lines = text.split("\n")
         for idx, line in enumerate(lines):
             await page.keyboard.type(line)
@@ -209,76 +236,117 @@ async def send_reply(page, text: str) -> bool:
 async def extract_chat_messages(page) -> list:
     """
     Returns list of {text, isOut} for all visible messages in div#main.
-    Uses JavaScript for reliable DOM traversal.
+    De-duplicates consecutive identical messages.
     """
     return await page.evaluate('''() => {
         const rows = Array.from(document.querySelectorAll(
             'div#main div[role="row"], div#main .message-in, div#main .message-out'
         ));
+        const results = [];
         const seen = new Set();
-        return rows.map(r => {
+        for (const r of rows) {
             const textEl = r.querySelector('span.selectable-text') || r.querySelector('.copyable-text');
             const text = textEl ? textEl.innerText.trim() : '';
-            if (!text || seen.has(text)) return null;
-            seen.add(text);
+            if (!text) continue;
+            const key = text.slice(0, 80);
+            if (seen.has(key)) continue;
+            seen.add(key);
             const isOut = (
                 r.classList.contains('message-out') ||
-                r.closest('.message-out') !== null ||
-                (r.dataset.id && r.dataset.id.startsWith('true_'))
+                !!r.closest('.message-out') ||
+                (r.dataset && r.dataset.id && r.dataset.id.startsWith('true_'))
             );
-            return { text, isOut };
-        }).filter(Boolean);
+            results.push({ text, isOut });
+        }
+        return results;
     }''')
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# IMAGE / DOCUMENT ANALYZER
+# MEDIA COLLECTOR — download and analyze ALL customer images/files in the chat
 # ──────────────────────────────────────────────────────────────────────────────
 
-async def extract_media(page, phone: str) -> tuple:
+async def collect_all_media_text(page, phone: str) -> tuple:
     """
-    Checks for images or documents in div#main.
-    Returns (analyzed_text: str, has_image: bool, has_doc: bool)
-    """
-    analyzed = ""
-    has_image = False
-    has_doc = False
+    Finds ALL customer images and documents currently visible in div#main.
+    Downloads them, runs OCR/extraction on each, and returns combined text.
 
-    img_el = await page.query_selector('div#main .message-in img[src*="blob:"]')
-    if img_el:
-        has_image = True
-        ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
-        save_path = os.path.join(FILES_DIR, f"{phone}_{ts}.png")
+    Returns:
+        (combined_ocr_text: str, has_any_media: bool)
+    """
+    all_text_parts = []
+    has_media = False
+
+    # ── Images (photos, screenshots) ──────────────────────────────────────────
+    img_els = await page.query_selector_all('div#main .message-in img[src*="blob:"]')
+    for i, img_el in enumerate(img_els):
         try:
+            ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
+            save_path = os.path.join(FILES_DIR, f"{phone}_{ts}_{i}.png")
             await img_el.screenshot(path=save_path)
-            print(f"[MEDIA] Image saved → {os.path.basename(save_path)}, running OCR...", flush=True)
-            summary, _ = analyze_file(save_path, ".png")
-            analyzed = summary
+            ocr_text = run_image_ocr(save_path)
+            if ocr_text.strip():
+                all_text_parts.append(ocr_text)
+                print(f"[MEDIA] Image {i+1} OCR extracted {len(ocr_text)} chars", flush=True)
+            has_media = True
         except Exception as e:
-            print(f"[OCR ERROR] {e}", flush=True)
+            print(f"[OCR] Image {i+1} error: {e}", flush=True)
 
-    if not has_image:
-        doc_el = await page.query_selector('div#main .message-in span[title*="."], div#main .message-in div[title*="."]')
-        if doc_el:
-            has_doc = True
-            doc_name = await doc_el.get_attribute("title") or "document"
-            analyzed = f"[Document: {doc_name}]"
+    # ── Documents (PDF, Word, Excel, etc.) ────────────────────────────────────
+    # WhatsApp shows document name in span[title] or div[title] inside .message-in
+    doc_els = await page.query_selector_all('div#main .message-in span[title], div#main .message-in div[title]')
+    for doc_el in doc_els:
+        doc_name = (await doc_el.get_attribute("title") or "").strip()
+        if not doc_name:
+            continue
+        ext = os.path.splitext(doc_name)[1].lower()
+        if ext not in (".pdf", ".docx", ".doc", ".xlsx", ".xls", ".csv", ".txt", ".png", ".jpg", ".jpeg"):
+            continue
 
-    return analyzed, has_image, has_doc
+        # Try to find a download button near this doc element
+        try:
+            download_btn = await doc_el.evaluate_handle(
+                'el => el.closest("div[role=\'button\']") || '
+                'el.closest("[data-icon=\'download\']") || '
+                'el.parentElement.querySelector("[data-icon=\'download\']")'
+            )
+            btn_el = download_btn.as_element()
+            if btn_el:
+                async with page.expect_download() as dl_info:
+                    await btn_el.click()
+                dl = await dl_info.value
+                save_path = os.path.join(FILES_DIR, f"{phone}_{doc_name}")
+                await dl.save_as(save_path)
+                _, raw_text = analyze_file(save_path, ext)
+                if raw_text.strip():
+                    all_text_parts.append(raw_text)
+                    print(f"[MEDIA] Document '{doc_name}' extracted {len(raw_text)} chars", flush=True)
+                has_media = True
+        except Exception as e:
+            print(f"[MEDIA] Doc '{doc_name}' download/extract: {e}", flush=True)
+            # Fall back: at least note the document name
+            all_text_parts.append(f"Document: {doc_name}")
+            has_media = True
+
+    return "\n\n".join(all_text_parts), has_media
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# PROCESS A SINGLE CHAT (opened in div#main)
+# PROCESS ACTIVE CHAT
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def process_active_chat(page) -> None:
     """
-    Main processing logic for the chat currently open in div#main.
-    Implements 2-second stop-typing detection and per-step validation.
+    Main processing logic for the chat open in div#main.
+    - Detects new customer messages (text + any media)
+    - Waits for 2s stop-typing silence
+    - Validates content per step
+    - Sends appropriate reply
+    - Logs extracted data to 8-column Excel
     """
     global _last_seen
 
-    # Get contact info from header
+    # ── Get contact info ───────────────────────────────────────────────────────
     header_el = (
         await page.query_selector('header span[title]')
         or await page.query_selector('header div[role="button"] span')
@@ -290,182 +358,154 @@ async def process_active_chat(page) -> None:
     phone_m = re.search(r'\+?\d[\d\s\-]{8,15}\d', contact_title)
     if phone_m:
         phone = sanitize_phone(phone_m.group(0))
-        name = "Customer"
+        name  = "Customer"
     else:
-        name = contact_title
+        name  = contact_title
         phone = sanitize_phone(contact_title) if re.search(r'\d{10}', contact_title) else ""
 
     if not phone:
         phone = "91" + re.sub(r'[^0-9]', '', str(abs(hash(contact_title))))[:10]
 
-    # Extract all visible messages
+    # ── Extract all visible messages ───────────────────────────────────────────
     messages = await extract_chat_messages(page)
     if not messages:
         return
 
-    # Find the latest incoming (customer) message
+    # Get all incoming messages (customer's)
     incoming = [m for m in messages if not m['isOut']]
     if not incoming:
         return
 
     latest_msg = incoming[-1]['text']
 
-    # ── FILTER: reject if this is actually one of the bot's own reply messages ──
-    # (Sometimes WhatsApp Web mis-classifies the bot's own sent message as incoming
-    #  for a split second before the DOM updates the 'message-out' class.)
-    BOT_REPLY_PREFIXES = (
-        "🙏 *Thank you for contacting us!",
-        "✅ *Thank you for sharing your requirements!",
-        "🙏 *Thanks for sharing all the details!",
-        "🙏 *Thank you for sharing all your details!",
-        "📋 *Please share your product requirements!",
-        "🏢 *Please share your business details!",
-    )
-    if any(latest_msg.startswith(p[:30]) for p in BOT_REPLY_PREFIXES):
-        return  # This is the bot's own message — skip
-
-    # ── DEDUPLICATION: skip if this is the same message we already processed ──
-    prev = _last_seen.get(phone, {})
-    if prev.get("text") == latest_msg:
-        # Message unchanged — nothing new from the customer
+    # ── Filter out bot's own reply being misclassified ─────────────────────────
+    if _is_bot_reply(latest_msg):
         return
 
-    # New incoming message detected!
-    _last_seen[phone] = {"text": latest_msg, "recorded": False, "pending_reply": True, "arrived_at": time.time()}
+    # ── Deduplication ──────────────────────────────────────────────────────────
+    prev = _last_seen.get(phone, {})
+    if prev.get("text") == latest_msg:
+        return  # Same message — nothing new
+
+    # ── New message detected! ──────────────────────────────────────────────────
+    _last_seen[phone] = {"text": latest_msg, "arrived_at": time.time()}
     record_customer_message_time(phone)
-    _last_seen[phone]["recorded"] = True
 
     now_str = datetime.now(IST).strftime("%H:%M:%S")
     print(f"\n[{now_str}] 📩 New msg from {name} ({phone}): '{latest_msg[:60]}'", flush=True)
 
-    # ── Get current state ─────────────────────────────────────────────────────
+    # ── State machine ──────────────────────────────────────────────────────────
     current_step, can_advance = register_customer_incoming_message(phone, latest_msg)
 
     if not can_advance:
-        print(f"         [WAIT] Step {current_step} — bot replied, waiting for customer's next message.", flush=True)
+        print(f"         [WAIT] Step {current_step} — waiting for customer's next reply.", flush=True)
         return
 
-    # ── STEP 0 → Reply immediately after 2s (Step 1 message) ─────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # STEP 0: First message from customer → send Step 1 after 2s
+    # ══════════════════════════════════════════════════════════════════════════
     if current_step == 0:
-        print(f"         ⏳ Step 0: waiting {STEP1_DELAY_S}s then sending Step 1...", flush=True)
+        print(f"         ⏳ First message → sending Step 1 in {STEP1_DELAY_S}s...", flush=True)
         await asyncio.sleep(STEP1_DELAY_S)
-        reply = get_step_message(1)
-        success = await send_reply(page, reply)
-        if success:
-            # Pass the customer's triggering message so state machine knows what was replied to
-            mark_bot_reply_sent(phone, 1, triggered_by_text=latest_msg)
-            # Keep _last_seen text as latest_msg (do NOT reset to "") —
-            # so next loop tick the same "Hi" is not re-processed as a new message.
-            _last_seen[phone]["pending_reply"] = False
 
-            # Log to Excel (first contact)
+        success = await send_reply(page, get_step_message(1))
+        if success:
+            mark_bot_reply_sent(phone, 1, triggered_by_text=latest_msg)
+            # Log first contact (name only at this point)
             log_customer_lead(
                 sender_phone=phone,
                 sender_name=name,
                 message_text=latest_msg,
-                is_requirement_step=False,
-                is_business_step=False,
+                ocr_text="",
             )
             print(f"         ✅ Step 1 sent to {phone}!", flush=True)
         return
 
-    # ── STEP 1 or 2: wait until customer stops typing (2s silence) ───────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # STEP 1 or STEP 2: Wait for stop-typing (2s silence), then validate & reply
+    # ══════════════════════════════════════════════════════════════════════════
     if current_step in (1, 2):
-        print(f"         ⏳ Step {current_step}: waiting for customer to stop typing ({TYPING_WAIT_S}s silence)...", flush=True)
+        step_label = "requirements" if current_step == 1 else "business details"
+        print(f"         ⏳ Step {current_step}: waiting for customer to finish ({TYPING_SILENCE_S}s silence)...", flush=True)
 
-        # Poll for silence — check if more messages arrive
+        # ── Poll until customer has been silent for TYPING_SILENCE_S seconds ──
         silence_start = time.time()
         while True:
             await asyncio.sleep(0.5)
 
-            # Re-check messages — has customer sent another one?
-            messages_now = await extract_chat_messages(page)
-            incoming_now = [m for m in messages_now if not m['isOut']]
+            # Re-read messages to detect new ones
+            msgs_now = await extract_chat_messages(page)
+            incoming_now = [m for m in msgs_now if not m['isOut'] and not _is_bot_reply(m['text'])]
+
             if incoming_now and incoming_now[-1]['text'] != latest_msg:
-                # Customer sent another message — update and restart silence wait
+                # Customer sent another message — reset silence timer
                 latest_msg = incoming_now[-1]['text']
                 _last_seen[phone]["text"] = latest_msg
                 record_customer_message_time(phone)
                 silence_start = time.time()
-                print(f"         [TYPING] Customer still sending messages...", flush=True)
+                print(f"         📝 Customer still sending... resetting silence timer.", flush=True)
                 continue
 
-            # Check if we've had TYPING_WAIT_S seconds of silence
-            if (time.time() - silence_start) >= TYPING_WAIT_S:
+            if (time.time() - silence_start) >= TYPING_SILENCE_S:
                 break
 
-        print(f"         ✓ Customer stopped typing. Analyzing...", flush=True)
-        await asyncio.sleep(STEP_REPLY_DELAY_S)
+        print(f"         ✓ Customer stopped. Collecting all messages and media...", flush=True)
 
-        # Extract media
-        analyzed, has_image, has_doc = await extract_media(page, phone)
+        # ── Collect ALL customer text messages since last bot reply ────────────
+        all_msgs_final = await extract_chat_messages(page)
+        all_incoming   = [m['text'] for m in all_msgs_final if not m['isOut'] and not _is_bot_reply(m['text'])]
+        # Take up to last 10 customer messages for entity extraction
+        combined_customer_text = "\n".join(all_incoming[-10:])
 
-        # Build final message text (collect ALL incoming messages since last bot reply)
-        messages_final = await extract_chat_messages(page)
-        incoming_final = [m['text'] for m in messages_final if not m['isOut']]
-        combined_text = "\n".join(incoming_final[-5:])  # Last 5 customer messages
+        # ── Collect ALL customer media (images, docs, files) ──────────────────
+        ocr_text, has_media = await collect_all_media_text(page, phone)
 
+        # Wait the configured reply delay
+        await asyncio.sleep(REPLY_DELAY_S)
+
+        # ── Validate customer input for this step ─────────────────────────────
         if current_step == 1:
-            # Validate: did customer share requirements?
-            valid = validate_step1_reply(combined_text, has_image, has_doc)
+            valid = validate_step1_reply(combined_customer_text, has_image=has_media, has_document=has_media)
+
             if valid:
-                # Log requirements to Excel
-                req_text = analyzed if analyzed else parse_product_details(combined_text)
+                # Log to Excel with extracted entity data
                 log_customer_lead(
                     sender_phone=phone,
                     sender_name=name,
-                    message_text=combined_text,
-                    analyzed_products=req_text,
-                    is_requirement_step=True,
-                    is_business_step=False,
+                    message_text=combined_customer_text,
+                    ocr_text=ocr_text,
                 )
                 # Send Step 2
-                reply = get_step_message(2)
-                success = await send_reply(page, reply)
+                success = await send_reply(page, get_step_message(2))
                 if success:
-                    # Store the customer message that triggered this reply — so state machine
-                    # won't fire again until a genuinely NEW customer message arrives.
                     mark_bot_reply_sent(phone, 2, triggered_by_text=latest_msg)
-                    _last_seen[phone]["pending_reply"] = False
-                    # Do NOT reset text to "" — keep latest_msg so deduplication works correctly
                     print(f"         ✅ Step 2 sent to {phone}!", flush=True)
             else:
-                # Validation failed — send retry, but do NOT advance step.
-                # Record combined_text as last_replied_text so the SAME message
-                # won't re-trigger this retry forever — customer must send something new.
-                print(f"         ⚠ Step 1 validation — asking customer to share requirements.", flush=True)
-                retry = get_retry_message(1)
-                await send_reply(page, retry)
-                mark_bot_reply_sent(phone, 1, triggered_by_text=latest_msg)  # Stay at step 1 but lock
-                _last_seen[phone]["pending_reply"] = False
+                print(f"         ⚠ No requirements detected — sending retry.", flush=True)
+                await send_reply(page, get_retry_message(1))
+                mark_bot_reply_sent(phone, 1, triggered_by_text=latest_msg)
                 print(f"         🔁 Requirements request sent to {phone}.", flush=True)
 
         elif current_step == 2:
-            # Validate: did customer share business details?
-            valid = validate_step2_reply(combined_text, has_image, has_doc)
+            valid = validate_step2_reply(combined_customer_text, has_image=has_media, has_document=has_media)
+
             if valid:
                 # Log business details to Excel
                 log_customer_lead(
                     sender_phone=phone,
                     sender_name=name,
-                    message_text=combined_text,
-                    analyzed_products="",
-                    is_requirement_step=False,
-                    is_business_step=True,
+                    message_text=combined_customer_text,
+                    ocr_text=ocr_text,
                 )
                 # Send Step 3
-                reply = get_step_message(3)
-                success = await send_reply(page, reply)
+                success = await send_reply(page, get_step_message(3))
                 if success:
                     mark_bot_reply_sent(phone, 3, triggered_by_text=latest_msg)
-                    _last_seen[phone]["pending_reply"] = False
                     print(f"         ✅ Step 3 sent to {phone}! Flow complete.", flush=True)
             else:
-                print(f"         ⚠ Step 2 validation — asking customer to share business details.", flush=True)
-                retry = get_retry_message(2)
-                await send_reply(page, retry)
-                mark_bot_reply_sent(phone, 2, triggered_by_text=latest_msg)  # Stay at step 2 but lock
-                _last_seen[phone]["pending_reply"] = False
+                print(f"         ⚠ No business details detected — sending retry.", flush=True)
+                await send_reply(page, get_retry_message(2))
+                mark_bot_reply_sent(phone, 2, triggered_by_text=latest_msg)
                 print(f"         🔁 Business details request sent to {phone}.", flush=True)
 
 
@@ -474,7 +514,6 @@ async def process_active_chat(page) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def open_unread_chat(page, span_el) -> bool:
-    """Click a chat in pane-side to open it. Returns True if successful."""
     try:
         row = await span_el.evaluate_handle(
             'el => el.closest("div[role=\'listitem\']") || el.closest("div[tabindex]") || el.parentElement'
@@ -496,10 +535,11 @@ async def main():
     print("=" * 60, flush=True)
     print("  🤖  WhatsApp Free Bot — 100% Automatic 24/7", flush=True)
     print("=" * 60, flush=True)
-    print("  📱  Mode     : Local WhatsApp Web (Playwright)", flush=True)
-    print("  💸  Cost     : ₹0.00 Forever", flush=True)
-    print("  ✅  Flow     : Step 1 → Step 2 → Step 3 (with validation)", flush=True)
-    print("  📊  Excel    : Raw data only, 10 columns, Desktop files", flush=True)
+    print("  📱  Mode    : Local WhatsApp Web (Playwright)", flush=True)
+    print("  💸  Cost    : ₹0.00 Forever", flush=True)
+    print("  ✅  Flow    : Step 1 → Step 2 → Step 3 (with validation)", flush=True)
+    print("  📊  Excel   : 8 columns — exact match to your template", flush=True)
+    print("  📎  Media   : Photos, PDFs, Word, Excel, Screenshots supported", flush=True)
     print("=" * 60, flush=True)
 
     async with async_playwright() as p:
@@ -522,7 +562,7 @@ async def main():
 
         while True:
             try:
-                # ── Dismiss popups ──────────────────────────────────────────
+                # ── Dismiss popups ─────────────────────────────────────────────
                 for _ in range(2):
                     close_btn = await page.query_selector(
                         'span[data-icon="x-alt"], span[data-icon="x"], button[aria-label="Close"]'
@@ -531,7 +571,7 @@ async def main():
                         try: await close_btn.click(); await asyncio.sleep(0.3)
                         except Exception: pass
 
-                # ── Scan sidebar for ALL unread chats ──────────────────────
+                # ── Scan sidebar for ALL unread chats ──────────────────────────
                 unread_chats = await page.evaluate('''() => {
                     const spans = Array.from(document.querySelectorAll('div#pane-side span[title]'));
                     return spans.map(s => {
@@ -554,11 +594,11 @@ async def main():
                         if opened:
                             await process_active_chat(page)
 
-                # ── Also check the currently visible open chat ──────────────
+                # ── Also check the currently visible open chat ──────────────────
                 if await page.query_selector('div#main header'):
                     await process_active_chat(page)
 
-                # ── Flush any pending Excel writes ──────────────────────────
+                # ── Flush pending Excel queue ───────────────────────────────────
                 flush_pending_excel_queue()
 
                 await asyncio.sleep(1.0)
