@@ -38,6 +38,7 @@ from app.exports.excel_exporter import sync_customer_to_excel, flush_pending_exc
 from app.database.session import SessionLocal, init_db
 from app.database.models import Customer, Conversation, Message, ResponseLog, utc_now
 from app.documents.ocr_engine import run_image_ocr
+from document_analyzer import analyze_file, parse_product_details
 
 IST = timezone(timedelta(hours=5, minutes=30))
 BASE_DIR    = settings.BASE_DIR
@@ -404,19 +405,51 @@ async def process_active_chat(page) -> None:
     has_media = any(m.get('hasImg') or m.get('hasDoc') for m in all_msgs_final if not m['isOut'])
 
     ocr_text = ""
+    extracted_doc_summary = ""
+    latest_doc_title = ""
+
+    for m in all_msgs_final:
+        if not m['isOut'] and m.get('hasDoc') and m.get('docTitle'):
+            latest_doc_title = m['docTitle']
+
     if has_media:
         try:
+            # 1. Download & Parse Documents (PDF, Excel, Word)
+            doc_btns = await page.query_selector_all('div#main div.message-in div[role="button"]:has(span[data-icon*="download"]), div#main div.message-in span[data-icon="download"]')
+            for d_btn in doc_btns[-2:]:
+                try:
+                    async with page.expect_download(timeout=4000) as download_info:
+                        await d_btn.click(timeout=2000)
+                    download = await download_info.value
+                    orig_name = download.suggested_filename
+                    doc_path = os.path.join(FILES_DIR, orig_name)
+                    await download.save_as(doc_path)
+                    doc_summary, doc_raw = analyze_file(doc_path)
+                    if doc_raw:
+                        ocr_text += f"\n{doc_raw}"
+                    if doc_summary:
+                        extracted_doc_summary += f"\n{doc_summary}"
+                    print(f"         📄 Downloaded & analyzed document '{orig_name}' ({len(doc_raw)} chars)", flush=True)
+                except Exception:
+                    pass
+
+            # 2. Image OCR
             img_els = await page.query_selector_all('div#main img')
             for i, img_el in enumerate(img_els[-2:]):
-                ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
-                save_path = os.path.join(FILES_DIR, f"{phone}_{ts}_{i}.png")
-                await img_el.screenshot(path=save_path, timeout=3000)
-                extracted_ocr = run_image_ocr(save_path)
-                if extracted_ocr:
-                    ocr_text += f"\n{extracted_ocr}"
-                    print(f"         📷 OCR extracted {len(extracted_ocr)} chars", flush=True)
-        except Exception:
-            pass
+                try:
+                    ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
+                    save_path = os.path.join(FILES_DIR, f"{phone}_{ts}_{i}.png")
+                    await img_el.screenshot(path=save_path, timeout=3000)
+                    img_summary, img_raw = analyze_file(save_path)
+                    if img_raw:
+                        ocr_text += f"\n{img_raw}"
+                    if img_summary:
+                        extracted_doc_summary += f"\n{img_summary}"
+                    print(f"         📷 OCR analyzed image {i}", flush=True)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"         [MEDIA PROCESS ERROR] {e}", flush=True)
 
     # ── AI/NLP EXTRACTION ACROSS COMPLETE CONVERSATION ─────────────────────────
     attachment_texts = [ocr_text] if ocr_text else None
@@ -476,6 +509,14 @@ async def process_active_chat(page) -> None:
 
         # Extract any newly provided product details, quantities, or notes
         new_req = extraction.format_requirements_summary()
+        if not new_req and extracted_doc_summary:
+            new_req = extracted_doc_summary.strip()
+
+        if not new_req and ocr_text:
+            ocr_prod = parse_product_details(ocr_text)
+            if ocr_prod:
+                new_req = ocr_prod
+
         if not new_req and not _is_bot_reply(latest_msg):
             clean_text = latest_msg.strip()
             lower_text = clean_text.lower()
@@ -495,13 +536,19 @@ async def process_active_chat(page) -> None:
                 if has_product_word or has_unit_word:
                     new_req = clean_text
 
+        # If still no specific items could be parsed, but document/photo exists:
+        if not new_req and has_media:
+            if latest_doc_title:
+                clean_title = re.sub(r'^(?:view|download)\s+["\']?|["\']?$', '', latest_doc_title, flags=re.I).strip()
+                new_req = f"Document: {clean_title} (Attached in WhatsApp)"
+            else:
+                new_req = "Photo Attachment (Product List / Specifications)"
+
         if new_req:
-            if not customer.requirements_summary:
+            if not customer.requirements_summary or customer.requirements_summary in ("[Product Photo Attached]", "[Product Photo / Document Attached]"):
                 customer.requirements_summary = new_req
             elif new_req.lower() not in customer.requirements_summary.lower():
                 customer.requirements_summary = f"{customer.requirements_summary}\n{new_req}"
-        elif has_media and not customer.requirements_summary:
-            customer.requirements_summary = "[Product Photo / Document Attached]"
 
         # Apply rule: Contact person fallback to Company Name
         if not customer.contact_person_name or customer.contact_person_name.lower() in ("customer", "none", ""):
