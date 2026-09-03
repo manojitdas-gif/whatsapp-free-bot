@@ -137,16 +137,26 @@ async def wait_for_login(page) -> bool:
 async def send_reply(page, text: str) -> bool:
     """Sends a text message through WhatsApp Web active chat."""
     try:
-        input_box = await page.wait_for_selector(
-            'footer div[contenteditable="true"], div[title="Type a message"], div[role="textbox"][contenteditable="true"]',
-            timeout=10000
-        )
+        input_box = None
+        for _ in range(15):
+            input_box = (
+                await page.query_selector('footer div[contenteditable="true"]')
+                or await page.query_selector('div[data-tab="10"][contenteditable="true"]')
+                or await page.query_selector('div[title="Type a message"]')
+                or await page.query_selector('div[role="textbox"][contenteditable="true"]')
+                or await page.query_selector('div#main footer div[contenteditable="true"]')
+                or await page.query_selector('p.selectable-text')
+            )
+            if input_box:
+                break
+            await asyncio.sleep(0.5)
+
         if not input_box:
             print("[SEND ERROR] Message input box not found in active chat.", flush=True)
             return False
 
-        await input_box.click()
-        await asyncio.sleep(0.2)
+        await input_box.click(force=True)
+        await asyncio.sleep(0.3)
 
         # Type message multiline if needed
         lines = text.split("\n")
@@ -157,9 +167,9 @@ async def send_reply(page, text: str) -> bool:
                 await page.keyboard.press("Enter")
                 await page.keyboard.up("Shift")
 
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.3)
         await page.keyboard.press("Enter")
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.8)
         return True
     except Exception as e:
         print(f"[SEND ERROR] Failed to send reply: {e}", flush=True)
@@ -170,21 +180,24 @@ async def process_chat(page, chat_item) -> None:
     """Reads unread messages from a chat, logs to Excel, and replies."""
     try:
         # Dismiss any popup or banner that might block clicks
-        close_btn = await page.query_selector('span[data-icon="x-alt"], span[data-icon="x"], button[aria-label="Close"]')
-        if close_btn:
-            try:
-                await close_btn.click()
-                await asyncio.sleep(0.3)
-            except Exception:
-                pass
+        for _ in range(3):
+            close_btn = await page.query_selector('span[data-icon="x-alt"], span[data-icon="x"], button[aria-label="Close"]')
+            if close_btn:
+                try:
+                    await close_btn.click()
+                    await asyncio.sleep(0.3)
+                except Exception:
+                    pass
 
-        await chat_item.click()
-        await asyncio.sleep(1.5)
+        # Click the chat row
+        row_handle = await chat_item.evaluate_handle('el => el.closest("div[role=\'listitem\']") || el.closest("div[tabindex]") || el.parentElement.parentElement || el')
+        row_el = row_handle.as_element() or chat_item
+        await row_el.click(force=True)
+        await asyncio.sleep(2.0)
 
         # 1. Extract contact name / phone from chat header
         header_title_el = await page.query_selector('header span[title]') or await page.query_selector('header div[role="button"] span')
-        contact_title = await header_title_el.inner_text() if header_title_el else "Customer"
-        contact_title = contact_title.strip()
+        contact_title = (await header_title_el.inner_text()).strip() if header_title_el else "Customer"
 
         # Determine phone number
         phone_match = re.search(r'\+?\d[\d\s-]{8,15}\d', contact_title)
@@ -193,33 +206,28 @@ async def process_chat(page, chat_item) -> None:
             name = "Customer"
         else:
             name = contact_title
-            # Fallback: check profile info or clean title
             phone = sanitize_phone(contact_title) if re.search(r'\d{10}', contact_title) else sanitize_phone(contact_title)
 
         if not phone:
-            # If name has no digits, use hash/name for session
             phone = "91" + re.sub(r'[^0-9]', '', str(abs(hash(contact_title))))[:10]
 
         # 2. Extract latest incoming messages
-        incoming_elements = await page.query_selector_all('div.message-in, div[data-id*="false_"]')
-        msg_text = ""
-        latest_el = incoming_elements[-1] if incoming_elements else None
-        if latest_el:
-            text_el = await latest_el.query_selector('span.selectable-text') or await latest_el.query_selector('.copyable-text')
-            if text_el:
-                msg_text = (await text_el.inner_text()).strip()
+        messages_data = await page.evaluate('''() => {
+            const rows = Array.from(document.querySelectorAll('div#main div[role="row"], div#main div.copyable-text'));
+            return rows.map(r => {
+                const textEl = r.querySelector('span.selectable-text') || r.querySelector('.copyable-text');
+                const text = textEl ? textEl.innerText.trim() : '';
+                const isOut = r.closest('div[data-id*="true_"]') !== null || r.classList.contains('message-out');
+                return { text, isOut };
+            }).filter(m => m.text.length > 0);
+        }''')
 
-        if not msg_text:
-            text_els = await page.query_selector_all('div#main span.selectable-text, div#main .copyable-text')
-            if text_els:
-                msg_text = (await text_els[-1].inner_text()).strip()
+        incoming_texts = [m['text'] for m in messages_data if not m['isOut']]
+        msg_text = incoming_texts[-1] if incoming_texts else "Hi"
 
-        if not msg_text:
-            msg_text = "Hi"
-
-        # Check for image
-        img_el = await latest_el.query_selector('img[src*="blob:"]') if latest_el else None
+        # Check for image or document
         analyzed_products = ""
+        img_el = await page.query_selector('div#main img[src*="blob:"]')
         if img_el:
             img_time = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
             saved_img_path = os.path.join(FILES_DIR, f"{phone}_{img_time}.png")
@@ -233,18 +241,11 @@ async def process_chat(page, chat_item) -> None:
             except Exception as e:
                 print(f"[OCR ERROR] {e}")
 
-        # Check for document
-        doc_el = (await latest_el.query_selector('span[title*="."]') or await latest_el.query_selector('div[title*="."]')) if latest_el else None
+        doc_el = await page.query_selector('div#main span[title*="."], div#main div[title*="."]')
         if doc_el:
             doc_title = await doc_el.get_attribute("title") or "document.pdf"
-            if not msg_text:
+            if not msg_text or msg_text == "Hi":
                 msg_text = f"[DOCUMENT: {doc_title}]"
-
-        # Unique key for deduplication
-        msg_key = f"{phone}:{msg_text}:{len(incoming_elements)}"
-        if msg_key in processed_messages:
-            return
-        processed_messages.add(msg_key)
 
         now_str = datetime.now(IST).strftime("%H:%M:%S")
         print(f"\n[{now_str}] 📩 Incoming WhatsApp Web Chat: {name} ({phone})", flush=True)
@@ -256,6 +257,9 @@ async def process_chat(page, chat_item) -> None:
         # 4. Instant Logging to 10-Column Excel
         is_req = (current_step in (0, 1))
         is_biz = (current_step == 2)
+        if is_req and not analyzed_products:
+            analyzed_products = parse_product_details(msg_text)
+
         log_customer_lead(
             sender_phone=phone,
             sender_name=name,
@@ -280,6 +284,8 @@ async def process_chat(page, chat_item) -> None:
                 if success:
                     mark_bot_reply_sent(phone, target_step)
                     print(f"         ✅ Step {target_step} delivered successfully!", flush=True)
+        else:
+            print(f"         [INFO] Chat logged. (Step: {current_step}, can_advance={can_advance})", flush=True)
 
     except Exception as e:
         print(f"[PROCESS ERROR] Error processing chat: {e}", flush=True)
