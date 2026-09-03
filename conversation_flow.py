@@ -59,23 +59,24 @@ STEP_MESSAGES = {
     ),
 }
 
-# Validation re-request messages (sent when customer skips relevant info)
+# Validation error messages (sent when customer does not provide required details)
 RETRY_MESSAGES = {
     1: (
-        "📋 *Please share your product requirements!*\n\n"
-        "To prepare your quotation, I need:\n"
+        "⚠️ *Please share your product requirements correctly!*\n\n"
+        "We need the following details to prepare your quotation:\n"
         "📦 *Product name* and description\n"
         "🔢 *Quantity* required\n"
-        "📐 *Size / specifications*\n\n"
-        "You can also share a *sample photo or document*. 📎"
+        "📐 *Size / Specifications*\n\n"
+        "📎 You can also share a *photo, catalogue, PDF or any document*."
     ),
     2: (
-        "🏢 *Please share your business details!*\n\n"
-        "To complete your quotation, I need:\n"
-        "🏢 *Business / Company Name*\n"
+        "⚠️ *Please share your business details correctly!*\n\n"
+        "We need the following to process your quotation:\n"
+        "🏢 *Company / Business Name*\n"
         "📋 *GST Number* (if applicable)\n"
-        "📍 *Complete Business Address*\n"
-        "👤 *Contact Person Name*"
+        "📍 *Complete Business Address* (with pin code)\n"
+        "👤 *Contact Person Name*\n\n"
+        "📎 You can also share a *visiting card or letterhead photo*."
     ),
 }
 
