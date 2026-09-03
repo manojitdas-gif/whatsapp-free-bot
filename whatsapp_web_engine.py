@@ -478,40 +478,19 @@ async def main():
                     except Exception:
                         pass
 
-                # ── Scan sidebar for unread chats directly via DOM ─────────────
-                unread_list = await page.evaluate('''() => {
-                    const badges = Array.from(document.querySelectorAll(
-                        'div#pane-side span[aria-label*="unread"], div#pane-side span[aria-label*="Unread"]'
-                    ));
-                    return badges.map((b, i) => {
-                        const row = b.closest('div[role="listitem"]') || b.closest('div[tabindex]') || b.parentElement.parentElement;
-                        const titleEl = row ? row.querySelector('span[title]') : null;
-                        return {
-                            idx: i,
-                            title: titleEl ? titleEl.getAttribute('title') : 'Customer',
-                            label: b.getAttribute('aria-label') || ''
-                        };
-                    });
-                }''')
-
-                for u in unread_list:
-                    idx = u['idx']
-                    print(f"\n[UNREAD] Opening chat #{idx + 1}: '{u['title']}' ({u['label']})", flush=True)
-                    opened = await page.evaluate('''(idx) => {
-                        const badges = Array.from(document.querySelectorAll(
-                            'div#pane-side span[aria-label*="unread"], div#pane-side span[aria-label*="Unread"]'
-                        ));
-                        if (badges[idx]) {
-                            const row = badges[idx].closest('div[role="listitem"]') || badges[idx].closest('div[tabindex]') || badges[idx].parentElement.parentElement;
-                            if (row) { row.click(); return true; }
-                            badges[idx].click();
-                            return true;
-                        }
-                        return false;
-                    }''', idx)
-                    if opened:
+                # ── Scan sidebar for unread badges and click directly with Playwright ──
+                badge = await page.query_selector(
+                    'div#pane-side span[aria-label*="unread"], div#pane-side span[aria-label*="Unread"]'
+                )
+                if badge:
+                    label = await badge.get_attribute("aria-label") or "unread message"
+                    print(f"\n[UNREAD] Clicking unread chat ({label})...", flush=True)
+                    try:
+                        await badge.click(force=True, timeout=4000)
                         await asyncio.sleep(1.5)
                         await process_active_chat(page)
+                    except Exception as ce:
+                        print(f"[CLICK ERROR] {ce}", flush=True)
 
                 # ── Also process whatever chat is currently open in main ───────
                 if await page.query_selector('div#main header'):
