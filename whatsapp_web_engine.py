@@ -256,28 +256,74 @@ async def extract_chat_messages(page) -> list:
     }''')
 
 
+async def extract_header_contact_info(page) -> tuple:
+    return await page.evaluate(r'''() => {
+        const header = document.querySelector('div#main header');
+        if (!header) return ["", ""];
+
+        let phone = "";
+        let profileName = "";
+
+        const spans = Array.from(header.querySelectorAll('span[title], span[dir="auto"], div[role="button"] span'));
+        const seen = new Set();
+        const textParts = [];
+
+        const ignoreList = ['click here', 'online', 'typing', 'not a contact', 'no common groups', 'common groups'];
+
+        for (const s of spans) {
+            const val = (s.getAttribute('title') || s.innerText || '').trim();
+            const lower = val.toLowerCase();
+            if (val && !seen.has(val) && !ignoreList.some(ig => lower.includes(ig))) {
+                seen.add(val);
+                textParts.push(val);
+            }
+        }
+
+        for (const part of textParts) {
+            const cleanDigits = part.replace(/[^0-9]/g, '');
+            if (cleanDigits.length >= 10 && cleanDigits.length <= 13) {
+                if (!phone) phone = cleanDigits;
+            } else if (part.startsWith('~')) {
+                profileName = part.replace(/^~\s*/, '').trim();
+            } else if (!profileName && isNaN(cleanDigits.slice(0, 4)) && part.length > 1) {
+                profileName = part;
+            }
+        }
+
+        if (!phone) {
+            const allText = header.innerText || '';
+            const m = allText.match(/\+?[0-9][0-9\s\-]{8,15}[0-9]/);
+            if (m) {
+                phone = m[0].replace(/[^0-9]/g, '');
+            }
+        }
+
+        return [phone, profileName];
+    }''')
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # PROCESS ACTIVE CHAT PIPELINE
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def process_active_chat(page) -> None:
-    global _last_processed_msg, _last_sent_response
+    global _last_processed_id, _last_sent_response
 
     header_el = await page.query_selector('div#main header')
     if not header_el:
         return
 
-    contact_title = (await header_el.inner_text()).strip()
-    phone_m = re.search(r'\+?\d[\d\s\-]{8,15}\d', contact_title)
-    if phone_m:
-        phone = sanitize_phone(phone_m.group(0))
-        name  = "Customer"
-    else:
-        name  = contact_title.split("\n")[0].strip()
-        phone = sanitize_phone(contact_title) if re.search(r'\d{10}', contact_title) else ""
+    phone_raw, profile_name = await extract_header_contact_info(page)
+    phone = sanitize_phone(phone_raw)
+    name  = profile_name.strip() if profile_name else ""
 
     if not phone:
-        phone = "91" + re.sub(r'[^0-9]', '', str(abs(hash(contact_title))))[:10]
+        contact_title = (await header_el.inner_text()).strip()
+        phone_m = re.search(r'\+?\d[\d\s\-]{8,15}\d', contact_title)
+        if phone_m:
+            phone = sanitize_phone(phone_m.group(0))
+        else:
+            phone = "91" + re.sub(r'[^0-9]', '', str(abs(hash(contact_title))))[:10]
 
     messages = await extract_chat_messages(page)
     if not messages:
@@ -376,8 +422,13 @@ async def process_active_chat(page) -> None:
             db.commit()
             db.refresh(customer)
 
-        if extraction.contact_person_name:
-            customer.contact_person_name = extraction.contact_person_name
+        # Priority: 1. Profile / extracted contact name, 2. Company name fallback
+        contact_person = extraction.contact_person_name or name
+        if not contact_person or contact_person.lower() in ("customer", "none", ""):
+            contact_person = extraction.company_business_name or ""
+        
+        if contact_person:
+            customer.contact_person_name = contact_person
         if extraction.email_id:
             customer.email = extraction.email_id
         if extraction.company_business_name:
