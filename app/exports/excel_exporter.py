@@ -148,14 +148,16 @@ def _write_to_workbook(file_path: str, customer) -> None:
     address = customer.complete_address or ""
     reqs = customer.requirements_summary or ""
 
-    # Find existing row by phone
+    # Find existing row by 10-digit normalized phone number to guarantee in-place update
+    cust_digits = "".join(filter(str.isdigit, str(customer.whatsapp_number or "")))[-10:]
     match_row = None
     first_empty = None
 
     for r in range(2, ws.max_row + 2):
         cv = ws.cell(row=r, column=4).value
         if cv:
-            if str(cv).strip() == phone_display.strip():
+            cell_digits = "".join(filter(str.isdigit, str(cv or "")))[-10:]
+            if cell_digits and cell_digits == cust_digits:
                 match_row = r
                 break
         elif first_empty is None:
@@ -219,19 +221,22 @@ def _write_to_csv(file_path: str, customer) -> None:
     address = customer.complete_address or ""
     reqs = customer.requirements_summary or ""
 
+    cust_digits = "".join(filter(str.isdigit, str(customer.whatsapp_number or "")))[-10:]
     match_idx = None
     for i in range(1, len(rows)):
-        if len(rows[i]) > 3 and rows[i][3] == phone_display:
-            match_idx = i
-            break
+        if len(rows[i]) > 3 and rows[i][3]:
+            row_digits = "".join(filter(str.isdigit, str(rows[i][3] or "")))[-10:]
+            if row_digits and row_digits == cust_digits:
+                match_idx = i
+                break
 
     if match_idx is not None:
         rows[match_idx][1] = last_ts
-        if name and not rows[match_idx][2]: rows[match_idx][2] = name
-        if email and not rows[match_idx][4]: rows[match_idx][4] = email
-        if company and not rows[match_idx][5]: rows[match_idx][5] = company
-        if gst and not rows[match_idx][6]: rows[match_idx][6] = gst
-        if address and not rows[match_idx][7]: rows[match_idx][7] = address
+        if name: rows[match_idx][2] = name
+        if email: rows[match_idx][4] = email
+        if company: rows[match_idx][5] = company
+        if gst: rows[match_idx][6] = gst
+        if address: rows[match_idx][7] = address
         if reqs:
             cur_req = rows[match_idx][8] if len(rows[match_idx]) > 8 else ""
             if not cur_req:
