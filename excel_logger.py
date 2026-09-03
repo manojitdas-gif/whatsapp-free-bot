@@ -1,7 +1,7 @@
 """
-excel_logger.py — Exact 8-Column Customer Lead Logger.
+excel_logger.py — Exact 9-Column Customer Lead Logger.
 
-EXACT COLUMNS (matching user's Excel template):
+EXACT COLUMNS:
   Col 1: First Contact Date (IST)
   Col 2: Last Contact Date (IST)
   Col 3: Contact Person Name
@@ -10,13 +10,13 @@ EXACT COLUMNS (matching user's Excel template):
   Col 6: Company / Business Name
   Col 7: GST Number
   Col 8: Complete Address
+  Col 9: Requirements  ← product details, quantities, specifications
 
 RULES:
-  - Data saved ONLY in these 8 columns — nothing else.
-  - A customer row is created once (on first message).
-  - Each subsequent message fills in ONLY empty cells — never overwrites existing data.
-  - Cells stay truly blank if no data found (no dashes, no placeholders).
-  - Data extracted from: text messages, photos (OCR), PDFs, Word, Excel, screenshots.
+  - ONE ROW per customer — updated in place, never duplicated.
+  - Each update ONLY fills blank cells or APPENDS to Requirements.
+  - Truly blank cells when no data found (no dashes, no placeholders).
+  - Data extracted from ALL formats: text, photos (OCR), PDFs, Word, Excel, CSV.
 """
 
 import os
@@ -60,7 +60,7 @@ THIN_BORDER = Border(
     bottom=Side(style="thin", color="C8E6C9"),
 )
 
-# ── EXACT 8 COLUMNS matching the user's Excel file ─────────────────────────────
+# ── EXACT 9 COLUMNS ────────────────────────────────────────────────────────────
 HEADERS = [
     "First Contact Date (IST)",
     "Last Contact Date (IST)",
@@ -70,8 +70,9 @@ HEADERS = [
     "Company / Business Name",
     "GST Number",
     "Complete Address",
+    "Requirements",
 ]
-COL_WIDTHS = [22, 22, 24, 18, 30, 32, 20, 50]
+COL_WIDTHS = [22, 22, 24, 18, 30, 32, 20, 50, 70]
 
 # Column index constants (1-based)
 C_FIRST_CONTACT = 1
@@ -82,6 +83,7 @@ C_EMAIL         = 5
 C_COMPANY       = 6
 C_GST           = 7
 C_ADDRESS       = 8
+C_REQUIREMENTS  = 9
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -290,20 +292,28 @@ def extract_entities(text: str, profile_name: str = "") -> dict:
 
 def _get_or_create_workbook(file_path: str) -> openpyxl.Workbook:
     os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
+    wb = None
     if os.path.exists(file_path):
         try:
-            return openpyxl.load_workbook(file_path)
+            wb = openpyxl.load_workbook(file_path)
         except Exception:
-            pass
+            wb = None
 
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Customer Leads"
+    if wb is None:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Customer Leads"
+    else:
+        ws = wb["Customer Leads"] if "Customer Leads" in wb.sheetnames else wb.active
+
     ws.freeze_panes = "A2"
     ws.sheet_view.showGridLines = True
 
+    # Always ensure row 1 has all exact 9 headers and correct formatting
     for col_idx, (header, width) in enumerate(zip(HEADERS, COL_WIDTHS), start=1):
-        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell = ws.cell(row=1, column=col_idx)
+        if cell.value != header:
+            cell.value = header
         cell.font = HEADER_FONT
         cell.fill = HEADER_FILL
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -315,25 +325,26 @@ def _get_or_create_workbook(file_path: str) -> openpyxl.Workbook:
 
 
 def _apply_lead_to_workbook(file_path: str, lead: dict) -> bool:
-    """Write or update a customer lead row — 8 columns only."""
+    """Write or update a customer lead row — 9 columns."""
     wb = _get_or_create_workbook(file_path)
     ws = wb["Customer Leads"] if "Customer Leads" in wb.sheetnames else wb.active
 
-    phone    = lead.get("phone", "")
-    ts       = lead.get("timestamp", "")
-    name     = lead.get("contact_name", "")
-    email    = lead.get("email", "")
-    company  = lead.get("company", "")
-    gst      = lead.get("gst", "")
-    address  = lead.get("address", "")
+    phone        = lead.get("phone", "")
+    ts           = lead.get("timestamp", "")
+    name         = lead.get("contact_name", "")
+    email        = lead.get("email", "")
+    company      = lead.get("company", "")
+    gst          = lead.get("gst", "")
+    address      = lead.get("address", "")
+    requirements = lead.get("requirements", "")
 
     align_c = Alignment(horizontal="center", vertical="center")
     align_l = Alignment(horizontal="left",   vertical="center", wrap_text=True)
 
     # Find existing row by WhatsApp Number (column 4)
-    match_row  = None
+    match_row   = None
     first_empty = None
-    row_count  = 0
+    row_count   = 0
 
     for r in range(2, ws.max_row + 2):
         cv = ws.cell(row=r, column=C_PHONE).value
@@ -352,6 +363,18 @@ def _apply_lead_to_workbook(file_path: str, lead: dict) -> bool:
             if not existing or str(existing).strip() == "":
                 ws.cell(row=row, column=col, value=new_val)
 
+    def _append_requirements(row, new_req):
+        """Append new requirement text to existing — never overwrite."""
+        if not new_req:
+            return
+        existing = str(ws.cell(row=row, column=C_REQUIREMENTS).value or "").strip()
+        if not existing:
+            ws.cell(row=row, column=C_REQUIREMENTS, value=new_req)
+        else:
+            # Only append if it contains genuinely new info (not already in the cell)
+            if new_req.strip().lower() not in existing.lower():
+                ws.cell(row=row, column=C_REQUIREMENTS, value=existing + "\n" + new_req)
+
     if match_row:
         # Always update Last Contact Date
         ws.cell(row=match_row, column=C_LAST_CONTACT, value=ts)
@@ -361,18 +384,21 @@ def _apply_lead_to_workbook(file_path: str, lead: dict) -> bool:
         _fill_if_empty(match_row, C_COMPANY, company)
         _fill_if_empty(match_row, C_GST,     gst)
         _fill_if_empty(match_row, C_ADDRESS, address)
+        # Requirements: always APPEND new product info
+        _append_requirements(match_row, requirements)
 
     else:
         new_row = first_empty if first_empty else (ws.max_row + 1)
         row_vals = [
-            ts,      # C1: First Contact Date
-            ts,      # C2: Last Contact Date
-            name,    # C3: Contact Person Name
-            phone,   # C4: WhatsApp Number
-            email,   # C5: Email ID
-            company, # C6: Company / Business Name
-            gst,     # C7: GST Number
-            address, # C8: Complete Address
+            ts,           # C1: First Contact Date
+            ts,           # C2: Last Contact Date
+            name,         # C3: Contact Person Name
+            phone,        # C4: WhatsApp Number
+            email,        # C5: Email ID
+            company,      # C6: Company / Business Name
+            gst,          # C7: GST Number
+            address,      # C8: Complete Address
+            requirements, # C9: Requirements
         ]
         is_alt = (new_row % 2 == 0)
         for col_idx, val in enumerate(row_vals, start=1):
@@ -461,6 +487,16 @@ def _update_live_csv(lead: dict) -> None:
             if val and not rows[idx][col]:
                 rows[idx][col] = val
 
+        def _safe_append(rows, idx, col, val):
+            while len(rows[idx]) <= col:
+                rows[idx].append("")
+            if val:
+                existing = rows[idx][col]
+                if not existing:
+                    rows[idx][col] = val
+                elif val.strip().lower() not in existing.lower():
+                    rows[idx][col] = existing + " | " + val
+
         if match_idx is not None:
             rows[match_idx][1] = lead.get("timestamp", "")  # Last contact
             _safe_fill(rows, match_idx, 2, lead.get("contact_name"))
@@ -468,6 +504,7 @@ def _update_live_csv(lead: dict) -> None:
             _safe_fill(rows, match_idx, 5, lead.get("company"))
             _safe_fill(rows, match_idx, 6, lead.get("gst"))
             _safe_fill(rows, match_idx, 7, lead.get("address"))
+            _safe_append(rows, match_idx, 8, lead.get("requirements"))  # Append new reqs
         else:
             rows.append([
                 lead.get("timestamp", ""),
@@ -478,6 +515,7 @@ def _update_live_csv(lead: dict) -> None:
                 lead.get("company") or "",
                 lead.get("gst") or "",
                 lead.get("address") or "",
+                lead.get("requirements") or "",
             ])
 
         with open(CSV_PATH, "w", encoding="utf-8-sig", newline="") as f:
@@ -495,24 +533,25 @@ def log_customer_lead(
     sender_name: str,
     message_text: str = "",
     ocr_text: str = "",
+    requirements: str = "",
 ) -> None:
     """
-    Log customer lead to all Excel/CSV files.
-    Extracts exactly the 8 column fields from message_text and ocr_text.
-    Called once per real incoming customer message.
+    Log customer lead to all Excel/CSV files (9 columns).
+    Extracts entity fields from message_text + ocr_text.
+    Requirements are saved separately (passed explicitly from engine).
 
     Args:
-        sender_phone: raw phone number string
-        sender_name:  WhatsApp profile display name
-        message_text: all customer text messages combined
-        ocr_text:     text extracted from customer's images/documents/files
+        sender_phone:  raw phone number string
+        sender_name:   WhatsApp profile display name
+        message_text:  all customer text messages combined
+        ocr_text:      text extracted from customer images/documents/files
+        requirements:  product requirements already parsed by the engine
     """
     now_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
     formatted_phone = format_phone_display(sender_phone)
 
-    # Combine all available text for maximum entity extraction accuracy
+    # Combine all text for entity extraction
     combined_text = "\n".join(filter(None, [message_text.strip(), ocr_text.strip()]))
-
     extracted = extract_entities(combined_text, profile_name=sender_name)
 
     lead = {
@@ -523,11 +562,12 @@ def log_customer_lead(
         "company":      extracted["company"],
         "gst":          extracted["gst"],
         "address":      extracted["address"],
+        "requirements": requirements,   # Pre-parsed product requirements
     }
 
     print(f"[LEAD] {formatted_phone} | Name: '{extracted['contact_name']}' | "
-          f"Company: '{extracted['company']}' | GST: '{extracted['gst']}' | "
-          f"Email: '{extracted['email']}' | Address: '{extracted['address'][:40]}'", flush=True)
+          f"Co: '{extracted['company']}' | GST: '{extracted['gst']}' | "
+          f"Req: '{(requirements or '')[:50]}...'", flush=True)
 
     # Cloud sync
     try:
@@ -537,6 +577,7 @@ def log_customer_lead(
             "name": extracted["contact_name"], "phone": formatted_phone,
             "email": extracted["email"], "company": extracted["company"],
             "gst": extracted["gst"], "address": extracted["address"],
+            "requirements": requirements,
         })
     except Exception:
         pass
