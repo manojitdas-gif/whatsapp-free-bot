@@ -1,27 +1,13 @@
 """
-whatsapp_web_engine.py — 100% Free 24/7 WhatsApp Bot Engine.
+whatsapp_web_engine.py — 100% Free 24/7 WhatsApp Web Automation Engine.
 
-FULL FLOW:
-  1. Customer sends first message (text, photo, file, doc)
-     → Bot waits 2s → sends Step 1 reply (ask requirements + photo)
-
-  2. Customer shares requirements (text, photo, PDF, Excel, Word, etc.)
-     → Bot waits until customer STOPS for 2s (stop-typing detection)
-     → VALIDATES: did customer share product requirements?
-       ✓ YES → waits 2s → sends Step 2 reply (ask business details)
-       ✗ NO  → sends error message: "Please share product requirements correctly"
-
-  3. Customer shares business details (name, GST, address, contact)
-     → Bot waits until customer STOPS for 2s
-     → VALIDATES: did customer share business details?
-       ✓ YES → waits 2s → sends Step 3 reply (thank you, team will connect)
-       ✗ NO  → sends error message: "Please share business details correctly"
-
-  4. DONE — bot logs silently, no more automated replies.
-
-EXCEL LOGGING (9 columns):
-  First Contact | Last Contact | Contact Name | WhatsApp Number
-  | Email ID | Company / Business Name | GST Number | Complete Address | Requirements
+CORE FEATURES:
+  1. data-pre-plain-text attribute extraction (100% reliable message & sender detection).
+  2. Direct DOM badge clicking for unread chats (no CSS string bugs).
+  3. Automatic 24/7 listening for incoming messages in both sidebar and active chat.
+  4. Step 1 → Step 2 → Step 3 flow with stop-typing silence detection (2s).
+  5. Error messages if required details are missing.
+  6. 9-column Excel logging (includes Requirements column, in-place update).
 """
 
 import os
@@ -49,7 +35,7 @@ from conversation_flow import (
     validate_step2_reply,
 )
 from excel_logger import log_customer_lead, flush_pending_excel_queue
-from document_analyzer import parse_product_details, run_image_ocr, analyze_file
+from document_analyzer import parse_product_details, run_image_ocr
 
 IST = timezone(timedelta(hours=5, minutes=30))
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
@@ -60,15 +46,12 @@ QR_IMAGE_PATH = os.path.join(os.path.expanduser("~"), "Desktop", "SCAN_WHATSAPP_
 os.makedirs(SESSION_DIR, exist_ok=True)
 os.makedirs(FILES_DIR, exist_ok=True)
 
-# ── TIMING CONFIG ──────────────────────────────────────────────────────────────
-STEP1_DELAY_S      = 2.0   # Wait 2s after first message → send Step 1
-TYPING_SILENCE_S   = 2.0   # Silence duration = "customer stopped typing"
-REPLY_DELAY_S      = 2.0   # After silence detected → wait 2s → send reply
+STEP1_DELAY_S    = 2.0
+TYPING_SILENCE_S = 2.0
+REPLY_DELAY_S    = 2.0
 
-# ── DEDUPLICATION — last seen message per phone ────────────────────────────────
 _last_seen: dict = {}
 
-# ── BOT OWN REPLY PREFIXES ────────────────────────────────────────────────────
 BOT_REPLY_PREFIXES = (
     "🙏 *Thank you for contacting us!",
     "✅ *Thank you for sharing your requirements!",
@@ -130,7 +113,7 @@ async def wait_for_login(page) -> bool:
     qr_saved = False
     while True:
         attempt += 1
-        if await page.query_selector('div[id="pane-side"]'):
+        if await page.query_selector('div#pane-side'):
             print("[SESSION] ✅ Logged in!", flush=True)
             if os.path.exists(QR_IMAGE_PATH):
                 try: os.remove(QR_IMAGE_PATH)
@@ -215,62 +198,66 @@ async def send_reply(page, text: str) -> bool:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# MESSAGE EXTRACTOR (100% Reliable DOM Classification)
+# BULLETPROOF MESSAGE EXTRACTOR (Using data-pre-plain-text & DOM)
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def extract_chat_messages(page) -> list:
     """
-    Returns list of dicts for all messages in the open chat:
-    [{ 'text': str, 'rawText': str, 'hasImg': bool, 'hasDoc': bool, 'docName': str, 'isOut': bool }]
-    Strictly separates incoming customer messages from outgoing bot messages.
+    Extracts all messages from the open chat in div#main.
+    Uses official WhatsApp data-pre-plain-text attribute to strictly identify
+    sender and outgoing (You) vs incoming (Customer) status.
     """
     return await page.evaluate('''() => {
-        const bubbles = Array.from(document.querySelectorAll('div#main div.message-in, div#main div.message-out'));
         const results = [];
-        for (const b of bubbles) {
-            const isOut = b.classList.contains('message-out') || !!b.closest('.message-out');
-            const textEl = b.querySelector('span.selectable-text') || b.querySelector('.copyable-text');
-            const text = textEl ? textEl.innerText.trim() : '';
-            const hasImg = !!b.querySelector('img[src*="blob:"]');
-            const docEl = b.querySelector('span[title], div[title]');
-            const docName = docEl ? (docEl.getAttribute('title') || '') : '';
-            const hasDoc = docName.includes('.') && (
-                docName.endsWith('.pdf') || docName.endsWith('.docx') || docName.endsWith('.doc') ||
-                docName.endsWith('.xlsx') || docName.endsWith('.xls') || docName.endsWith('.csv') ||
-                docName.endsWith('.txt')
-            );
-            if (text || hasImg || hasDoc) {
+        const main = document.querySelector('div#main');
+        if (!main) return results;
+
+        // 1. Text messages (have data-pre-plain-text)
+        const textNodes = Array.from(main.querySelectorAll('div.copyable-text[data-pre-plain-text]'));
+        for (const el of textNodes) {
+            const pre = el.getAttribute('data-pre-plain-text') || '';
+            const isOut = pre.includes('] You:') || pre.includes('] you:');
+            const spanText = el.querySelector('span.selectable-text') || el;
+            const text = spanText ? spanText.innerText.trim() : '';
+            if (text) {
                 results.push({
-                    text: text || (hasDoc ? `[Document: ${docName}]` : '[Image Attached]'),
-                    rawText: text,
-                    hasImg: hasImg,
-                    hasDoc: hasDoc,
-                    docName: docName,
-                    isOut: isOut
+                    text: text,
+                    isOut: isOut,
+                    hasImg: false,
+                    hasDoc: false
                 });
             }
         }
+
+        // 2. Images & media (check if any image is present in incoming bubbles)
+        const imgs = Array.from(main.querySelectorAll('img[src*="blob:"]'));
+        for (const img of imgs) {
+            const closestRow = img.closest('div[role="row"]') || img.parentElement;
+            // If the row doesn't have an outgoing mark
+            const isOut = closestRow ? (closestRow.innerText.includes('You:') || closestRow.className.includes('out')) : false;
+            results.push({
+                text: '[Image / Photo Attached]',
+                isOut: isOut,
+                hasImg: true,
+                hasDoc: false
+            });
+        }
+
         return results;
     }''')
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# MEDIA COLLECTOR (Fast & Safe — No Blocking Downloads)
+# MEDIA OCR COLLECTOR
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def collect_customer_media_ocr(page, phone: str) -> tuple:
-    """
-    Screenshots all customer images/photos in div#main and runs OCR.
-    Collects document names without hanging or opening modals.
-    Returns (ocr_text: str, has_media: bool)
-    """
     all_text_parts = []
     has_media = False
 
-    # 1. Images & photos (take screenshot directly of element, run OCR)
     try:
-        img_els = await page.query_selector_all('div#main .message-in img[src*="blob:"]')
-        for i, img_el in enumerate(img_els[-3:]):  # Process up to 3 recent images
+        img_els = await page.query_selector_all('div#main img[src*="blob:"]')
+        for i, img_el in enumerate(img_els[-3:]):
             try:
                 ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
                 save_path = os.path.join(FILES_DIR, f"{phone}_{ts}_{i}.png")
@@ -285,17 +272,6 @@ async def collect_customer_media_ocr(page, phone: str) -> tuple:
     except Exception:
         pass
 
-    # 2. Documents (extract title/name from bubble)
-    try:
-        doc_els = await page.query_selector_all('div#main .message-in span[title], div#main .message-in div[title]')
-        for doc_el in doc_els:
-            doc_name = (await doc_el.get_attribute("title") or "").strip()
-            if doc_name and "." in doc_name:
-                all_text_parts.append(f"Document attached: {doc_name}")
-                has_media = True
-    except Exception:
-        pass
-
     return "\n\n".join(all_text_parts), has_media
 
 
@@ -306,11 +282,7 @@ async def collect_customer_media_ocr(page, phone: str) -> tuple:
 async def process_active_chat(page) -> None:
     global _last_seen
 
-    # ── Get contact info from header ───────────────────────────────────────────
-    header_el = (
-        await page.query_selector('header span[title]')
-        or await page.query_selector('header div[role="button"] span')
-    )
+    header_el = await page.query_selector('div#main header')
     if not header_el:
         return
 
@@ -320,50 +292,43 @@ async def process_active_chat(page) -> None:
         phone = sanitize_phone(phone_m.group(0))
         name  = "Customer"
     else:
-        name  = contact_title
+        name  = contact_title.split("\n")[0].strip()
         phone = sanitize_phone(contact_title) if re.search(r'\d{10}', contact_title) else ""
 
     if not phone:
         phone = "91" + re.sub(r'[^0-9]', '', str(abs(hash(contact_title))))[:10]
 
-    # ── Extract all messages in chat ───────────────────────────────────────────
     messages = await extract_chat_messages(page)
     if not messages:
         return
 
-    # ONLY incoming customer messages (bot messages have isOut=True)
+    # ONLY incoming customer messages
     incoming = [m for m in messages if not m['isOut']]
     if not incoming:
         return
 
     latest_msg = incoming[-1]['text']
 
-    # Filter out any rare misclassified bot reply
     if _is_bot_reply(latest_msg):
         return
 
-    # Deduplication — skip if message has not changed
     prev = _last_seen.get(phone, {})
     if prev.get("text") == latest_msg:
         return
 
-    # New message detected from customer!
     _last_seen[phone] = {"text": latest_msg, "arrived_at": time.time()}
     record_customer_message_time(phone)
 
     now_str = datetime.now(IST).strftime("%H:%M:%S")
     print(f"\n[{now_str}] 📩 New msg from {name} ({phone}): '{latest_msg[:60]}'", flush=True)
 
-    # State transition check
     current_step, can_advance = register_customer_incoming_message(phone, latest_msg)
 
     if not can_advance:
         print(f"         [WAIT] Step {current_step} — waiting for customer's next reply.", flush=True)
         return
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # STEP 0: First message from customer → send Step 1 after 2s
-    # ══════════════════════════════════════════════════════════════════════════
+    # ── STEP 0: First message → reply Step 1 after 2s ────────────────────────
     if current_step == 0:
         print(f"         ⏳ First message → sending Step 1 in {STEP1_DELAY_S}s...", flush=True)
         await asyncio.sleep(STEP1_DELAY_S)
@@ -381,9 +346,7 @@ async def process_active_chat(page) -> None:
             print(f"         ✅ Step 1 sent to {phone}!", flush=True)
         return
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # STEP 1 or STEP 2: Wait for stop-typing (2s silence), then validate & reply
-    # ══════════════════════════════════════════════════════════════════════════
+    # ── STEP 1 or STEP 2: Stop-typing silence wait → validate → reply ─────────
     if current_step in (1, 2):
         print(f"         ⏳ Step {current_step}: waiting for customer to finish ({TYPING_SILENCE_S}s silence)...", flush=True)
 
@@ -407,25 +370,23 @@ async def process_active_chat(page) -> None:
 
         print(f"         ✓ Customer stopped. Processing requirements & media...", flush=True)
 
-        # Collect customer text (recent incoming messages)
         all_msgs_final = await extract_chat_messages(page)
         all_incoming   = [m['text'] for m in all_msgs_final if not m['isOut'] and not _is_bot_reply(m['text'])]
         combined_text  = "\n".join(all_incoming[-8:])
 
-        # OCR from images / document detection
         ocr_text, has_media = await collect_customer_media_ocr(page, phone)
 
         await asyncio.sleep(REPLY_DELAY_S)
 
-        # ── STEP 1: Requirements validation ──────────────────────────────────
+        # ── Step 1: Requirements validation ──────────────────────────────────
         if current_step == 1:
-            valid = validate_step1_reply(combined_text, has_image=has_media, has_document=has_media)
+            has_image_attached = any(m.get('hasImg') for m in all_msgs_final if not m['isOut']) or has_media
+            valid = validate_step1_reply(combined_text, has_image=has_image_attached, has_document=has_media)
 
             if valid:
                 all_text_for_req = "\n".join(filter(None, [combined_text, ocr_text]))
                 parsed_req = parse_product_details(all_text_for_req)
                 if not parsed_req:
-                    # Filter out filler words, use clean customer text
                     parsed_req = "\n".join(line for line in combined_text.splitlines() if len(line.strip()) > 3)[:1000]
 
                 log_customer_lead(
@@ -446,9 +407,10 @@ async def process_active_chat(page) -> None:
                 mark_bot_reply_sent(phone, 1, triggered_by_text=latest_msg)
                 print(f"         ⚠️ Requirements error message sent to {phone}.", flush=True)
 
-        # ── STEP 2: Business details validation ──────────────────────────────
+        # ── Step 2: Business details validation ──────────────────────────────
         elif current_step == 2:
-            valid = validate_step2_reply(combined_text, has_image=has_media, has_document=has_media)
+            has_image_attached = any(m.get('hasImg') for m in all_msgs_final if not m['isOut']) or has_media
+            valid = validate_step2_reply(combined_text, has_image=has_image_attached, has_document=has_media)
 
             if valid:
                 log_customer_lead(
@@ -456,7 +418,7 @@ async def process_active_chat(page) -> None:
                     sender_name=name,
                     message_text=combined_text,
                     ocr_text=ocr_text,
-                    requirements="",  # In-place update: keeps existing requirements
+                    requirements="",
                 )
 
                 success = await send_reply(page, get_step_message(3))
@@ -468,24 +430,6 @@ async def process_active_chat(page) -> None:
                 await send_reply(page, error_msg)
                 mark_bot_reply_sent(phone, 2, triggered_by_text=latest_msg)
                 print(f"         ⚠️ Business details error message sent to {phone}.", flush=True)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# SIDEBAR UNREAD CHAT OPENER
-# ──────────────────────────────────────────────────────────────────────────────
-
-async def open_unread_chat(page, span_el) -> bool:
-    try:
-        row = await span_el.evaluate_handle(
-            'el => el.closest("div[role=\'listitem\']") || el.closest("div[tabindex]") || el.parentElement'
-        )
-        row_el = row.as_element() or span_el
-        await row_el.click(force=True, timeout=5000)
-        await asyncio.sleep(1.5)
-        return True
-    except Exception as e:
-        print(f"[OPEN CHAT ERROR] {e}", flush=True)
-        return False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -529,40 +473,47 @@ async def main():
                 )
                 if close_btn:
                     try:
-                        await close_btn.click(timeout=2000)
+                        await close_btn.click(timeout=1000)
                         await asyncio.sleep(0.3)
                     except Exception:
                         pass
 
-                # ── Scan sidebar for unread chats (exact rows only, deduplicated) ─
-                unread_chats = await page.evaluate('''() => {
-                    const rows = Array.from(document.querySelectorAll('div#pane-side div[role="listitem"], div#pane-side div[tabindex="-1"]'));
-                    const unread = [];
-                    const seen = new Set();
-                    for (const r of rows) {
-                        const badge = r.querySelector('span[aria-label*="unread"]') || r.querySelector('span[aria-label*="Unread"]');
-                        if (badge) {
-                            const titleEl = r.querySelector('span[title]');
-                            const title = titleEl ? titleEl.getAttribute('title') : '';
-                            if (title && !seen.has(title)) {
-                                seen.add(title);
-                                unread.push({ title, label: badge.getAttribute('aria-label') });
-                            }
-                        }
-                    }
-                    return unread;
+                # ── Scan sidebar for unread chats directly via DOM ─────────────
+                unread_list = await page.evaluate('''() => {
+                    const badges = Array.from(document.querySelectorAll(
+                        'div#pane-side span[aria-label*="unread"], div#pane-side span[aria-label*="Unread"]'
+                    ));
+                    return badges.map((b, i) => {
+                        const row = b.closest('div[role="listitem"]') || b.closest('div[tabindex]') || b.parentElement.parentElement;
+                        const titleEl = row ? row.querySelector('span[title]') : null;
+                        return {
+                            idx: i,
+                            title: titleEl ? titleEl.getAttribute('title') : 'Customer',
+                            label: b.getAttribute('aria-label') || ''
+                        };
+                    });
                 }''')
 
-                for uchat in unread_chats:
-                    title = uchat['title']
-                    print(f"\n[UNREAD] Chat: '{title}' ({uchat['label']})", flush=True)
-                    span_el = await page.query_selector(f'div#pane-side span[title="{title}"]')
-                    if span_el:
-                        opened = await open_unread_chat(page, span_el)
-                        if opened:
-                            await process_active_chat(page)
+                for u in unread_list:
+                    idx = u['idx']
+                    print(f"\n[UNREAD] Opening chat #{idx + 1}: '{u['title']}' ({u['label']})", flush=True)
+                    opened = await page.evaluate('''(idx) => {
+                        const badges = Array.from(document.querySelectorAll(
+                            'div#pane-side span[aria-label*="unread"], div#pane-side span[aria-label*="Unread"]'
+                        ));
+                        if (badges[idx]) {
+                            const row = badges[idx].closest('div[role="listitem"]') || badges[idx].closest('div[tabindex]') || badges[idx].parentElement.parentElement;
+                            if (row) { row.click(); return true; }
+                            badges[idx].click();
+                            return true;
+                        }
+                        return false;
+                    }''', idx)
+                    if opened:
+                        await asyncio.sleep(1.5)
+                        await process_active_chat(page)
 
-                # ── Also process the currently open active chat ────────────────
+                # ── Also process whatever chat is currently open in main ───────
                 if await page.query_selector('div#main header'):
                     await process_active_chat(page)
 
