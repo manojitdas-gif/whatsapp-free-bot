@@ -53,6 +53,35 @@ REPLY_WAIT_S = 1.0
 
 _last_processed_id: dict = {}
 _last_sent_response: dict = {}
+_completed_phones: set = set()
+
+GREETING_WORDS = {
+    "hi", "hello", "hey", "hlo", "hii", "helo", "namaste", "namaskar",
+    "good morning", "good afternoon", "good evening", "shubh prabhat", "start"
+}
+
+def load_completed_phones() -> set:
+    db = SessionLocal()
+    try:
+        completed = set()
+        convs = db.query(Conversation).filter(
+            (Conversation.stage == ConversationStage.COMPLETED.value) |
+            (Conversation.status == ConversationStatus.COMPLETED.value)
+        ).all()
+        for c in convs:
+            cust = db.query(Customer).filter(Customer.id == c.customer_id).first()
+            if cust and cust.whatsapp_number:
+                digits = "".join(filter(str.isdigit, str(cust.whatsapp_number)))[-10:]
+                if digits:
+                    completed.add(digits)
+        return completed
+    except Exception as e:
+        print(f"[COMPLETED PHONES LOAD ERROR] {e}", flush=True)
+        return set()
+    finally:
+        db.close()
+
+_completed_phones = load_completed_phones()
 
 BOT_REPLY_PREFIXES = (
     "🙏 *Thank you for sharing all your details!",
@@ -428,21 +457,29 @@ async def process_active_chat(page) -> None:
             customer.complete_address = extraction.complete_address
 
         # Check if customer already completed the primary flow
-        is_already_completed = (_last_sent_response.get(phone) == "RESPONSE_1")
+        phone_digits = "".join(filter(str.isdigit, str(phone)))[-10:]
+
+        # Check if customer already completed the primary flow
+        is_already_completed = (
+            phone_digits in _completed_phones or
+            _last_sent_response.get(phone) == "RESPONSE_1"
+        )
         if not is_already_completed:
             completed_conv = db.query(Conversation).filter(
                 Conversation.customer_id == customer.id,
-                Conversation.status == ConversationStatus.COMPLETED.value
+                (Conversation.status == ConversationStatus.COMPLETED.value) |
+                (Conversation.stage == ConversationStage.COMPLETED.value)
             ).first()
             if completed_conv:
                 is_already_completed = True
+                _completed_phones.add(phone_digits)
 
         # Extract any newly provided product details, quantities, or notes
         new_req = extraction.format_requirements_summary()
         if not new_req and not _is_bot_reply(latest_msg):
             clean_text = latest_msg.strip()
             # Capture any additional product details, quantities, brand preferences, or delivery notes
-            if len(clean_text) > 1 and not any(clean_text.lower().startswith(p) for p in ("ok", "yes", "haa", "no", "thanks", "thank you")):
+            if len(clean_text) > 1 and not any(clean_text.lower().startswith(p) for p in ("ok", "yes", "haa", "no", "thanks", "thank you", "hi", "hello")):
                 new_req = clean_text
 
         if new_req:
@@ -470,24 +507,39 @@ async def process_active_chat(page) -> None:
             print(f"         ✓ In-place updated requirements in Excel for {phone}. No further reply generated (Conversation Completed).", flush=True)
             return
 
-        # ── BUILD CUMULATIVE EXTRACTION ACROSS ALL CONVERSATION STEPS ───────────
-        cumulative_extraction = ExtractionResult(
-            contact_person_name=customer.contact_person_name,
-            email_id=customer.email,
-            company_business_name=customer.company_name,
-            gst_number=customer.gst_number,
-            complete_address=customer.complete_address,
-            product_requirements=extraction.product_requirements,
-            raw_requirement_text=customer.requirements_summary
-        )
-        has_cumulative_media = has_media or bool(customer.requirements_summary)
+        # ── GREETING CHECK: GREETINGS ALWAYS TRIGGER RESPONSE_2 (REQUIREMENT REQUEST) ─
+        clean_msg = latest_msg.strip().lower()
+        clean_msg_alpha = re.sub(r'[^a-zA-Z\s]', '', clean_msg).strip()
+        is_greeting = (clean_msg in GREETING_WORDS) or (clean_msg_alpha in GREETING_WORDS)
 
-        # ── DECISION ENGINE: EVALUATE CUMULATIVE COMPLETENESS ───────────────────
-        response_type, audit_meta = evaluate_conversation_completeness(
-            cumulative_extraction, 
-            has_media=has_cumulative_media
-        )
-        reply_text = get_response_template(response_type)
+        if is_greeting:
+            response_type = "RESPONSE_2"
+            reply_text = get_response_template(response_type)
+            print(f"         👋 Customer greeted with '{latest_msg.strip()}'. Responding with RESPONSE_2 (Request Requirements).", flush=True)
+        else:
+            # ── BUILD CUMULATIVE EXTRACTION ACROSS ALL CONVERSATION STEPS ───────────
+            cumulative_extraction = ExtractionResult(
+                contact_person_name=customer.contact_person_name,
+                email_id=customer.email,
+                company_business_name=customer.company_name,
+                gst_number=customer.gst_number,
+                complete_address=customer.complete_address,
+                product_requirements=extraction.product_requirements,
+                raw_requirement_text=customer.requirements_summary
+            )
+            has_cumulative_media = has_media or bool(customer.requirements_summary)
+
+            # ── DECISION ENGINE: EVALUATE CUMULATIVE COMPLETENESS ───────────────────
+            response_type, audit_meta = evaluate_conversation_completeness(
+                cumulative_extraction, 
+                has_media=has_cumulative_media
+            )
+            reply_text = get_response_template(response_type)
+
+        # Do not repeat identical response if no new details were provided
+        if _last_sent_response.get(phone) == response_type and not new_req:
+            print(f"         ℹ️ {response_type} already sent to {phone} and no new info received. Skipping duplicate reply.", flush=True)
+            return
 
         # ── SEND EXACT PRIMARY RESPONSE ───────────────────────────────────────
         await asyncio.sleep(REPLY_WAIT_S)
@@ -513,6 +565,7 @@ async def process_active_chat(page) -> None:
             conv.stage = ConversationStage.COMPLETED.value
             conv.status = ConversationStatus.COMPLETED.value
             conv.completed_at = utc_now()
+            _completed_phones.add(phone_digits)
         elif response_type == "RESPONSE_2":
             conv.stage = ConversationStage.WAITING_FOR_PRODUCT_REQUIREMENTS.value
         elif response_type == "RESPONSE_3":
