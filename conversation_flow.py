@@ -130,23 +130,15 @@ def register_customer_incoming_message(sender_phone: str, message_text: str = ""
 
         # If customer already completed all 3 steps:
         if step >= 3:
-            # If they say "Hi" or send a greeting, restart the flow!
-            if is_greeting:
-                print(f"[FLOW] Customer {sender_phone} said '{clean}' after completion. Restarting flow!")
+            # If they send a greeting or new message, restart the inquiry flow!
+            if is_greeting or (now - state.get("updated_at", now)) > 120:
+                print(f"[FLOW] Customer {sender_phone} sent new inquiry after completion. Restarting flow!")
                 state = {"step": 0, "waiting_for_customer": False, "updated_at": now}
                 states[sender_phone] = state
                 _save_states(states)
                 return (0, True)
 
-            # If more than 1 hour passed since completion, restart for new inquiry!
-            if (now - state.get("updated_at", now)) > 3600:
-                print(f"[FLOW] Customer {sender_phone} sent new message after 1 hour. Restarting flow!")
-                state = {"step": 0, "waiting_for_customer": False, "updated_at": now}
-                states[sender_phone] = state
-                _save_states(states)
-                return (0, True)
-
-            # Otherwise, quietly log further comments to Excel without repeating bot replies
+            # Otherwise, quietly log further comments to Excel
             state["updated_at"] = now
             states[sender_phone] = state
             _save_states(states)
