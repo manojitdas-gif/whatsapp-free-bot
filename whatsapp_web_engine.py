@@ -2,36 +2,26 @@
 whatsapp_web_engine.py — 100% Free 24/7 WhatsApp Bot Engine.
 
 FULL FLOW:
-  1. Customer sends first message (any text, photo, file, document)
+  1. Customer sends first message (text, photo, file, doc)
      → Bot waits 2s → sends Step 1 reply (ask requirements + photo)
 
-  2. Customer shares requirements (text/photos/documents/PDFs/Excel/Word/anything)
+  2. Customer shares requirements (text, photo, PDF, Excel, Word, etc.)
      → Bot waits until customer STOPS for 2s (stop-typing detection)
      → VALIDATES: did customer share product requirements?
        ✓ YES → waits 2s → sends Step 2 reply (ask business details)
-       ✗ NO  → sends polite retry: "please share your requirements"
+       ✗ NO  → sends error message: "Please share product requirements correctly"
 
-  3. Customer shares business details (name, GST, address, contact — any format)
+  3. Customer shares business details (name, GST, address, contact)
      → Bot waits until customer STOPS for 2s
-     → VALIDATES: did customer share business info?
-       ✓ YES → sends Step 3 reply (thank you, team will connect)
-       ✗ NO  → sends polite retry: "please share your business details"
+     → VALIDATES: did customer share business details?
+       ✓ YES → waits 2s → sends Step 3 reply (thank you, team will connect)
+       ✗ NO  → sends error message: "Please share business details correctly"
 
   4. DONE — bot logs silently, no more automated replies.
 
-MEDIA HANDLING:
-  - All customer images, photos, screenshots → OCR text extraction
-  - PDF, Word, Excel, CSV files → text extraction
-  - Multiple files supported per message (all collected)
-
-EXCEL LOGGING (8 columns only):
-  First Contact Date | Last Contact Date | Contact Name | WhatsApp Number
-  | Email ID | Company/Business Name | GST Number | Complete Address
-
-DEDUPLICATION:
-  - Each phone's last processed message is tracked in memory
-  - Bot never replies twice to the same message
-  - Bot NEVER processes its own sent messages
+EXCEL LOGGING (9 columns):
+  First Contact | Last Contact | Contact Name | WhatsApp Number
+  | Email ID | Company / Business Name | GST Number | Complete Address | Requirements
 """
 
 import os
@@ -39,7 +29,6 @@ import sys
 import re
 import time
 import asyncio
-import tempfile
 from datetime import datetime, timezone, timedelta
 
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
@@ -60,7 +49,7 @@ from conversation_flow import (
     validate_step2_reply,
 )
 from excel_logger import log_customer_lead, flush_pending_excel_queue
-from document_analyzer import analyze_file, run_image_ocr
+from document_analyzer import parse_product_details, run_image_ocr, analyze_file
 
 IST = timezone(timedelta(hours=5, minutes=30))
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
@@ -77,10 +66,9 @@ TYPING_SILENCE_S   = 2.0   # Silence duration = "customer stopped typing"
 REPLY_DELAY_S      = 2.0   # After silence detected → wait 2s → send reply
 
 # ── DEDUPLICATION — last seen message per phone ────────────────────────────────
-# { phone: {"text": str, "arrived_at": float} }
 _last_seen: dict = {}
 
-# ── BOT OWN REPLY PREFIXES — filter these out from incoming detection ──────────
+# ── BOT OWN REPLY PREFIXES ────────────────────────────────────────────────────
 BOT_REPLY_PREFIXES = (
     "🙏 *Thank you for contacting us!",
     "✅ *Thank you for sharing your requirements!",
@@ -118,10 +106,6 @@ def _start_cloud_health_server():
 _start_cloud_health_server()
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# UTILITY
-# ──────────────────────────────────────────────────────────────────────────────
-
 def sanitize_phone(raw: str) -> str:
     c = re.sub(r'[^0-9]', '', raw)
     if c.startswith("91") and len(c) == 12:
@@ -132,7 +116,6 @@ def sanitize_phone(raw: str) -> str:
 
 
 def _is_bot_reply(text: str) -> bool:
-    """Returns True if text looks like one of the bot's own replies."""
     t = text.strip()
     return any(t.startswith(p[:25]) for p in BOT_REPLY_PREFIXES)
 
@@ -190,7 +173,7 @@ async def wait_for_login(page) -> bool:
 async def send_reply(page, text: str) -> bool:
     try:
         input_box = None
-        for _ in range(20):
+        for _ in range(15):
             input_box = (
                 await page.query_selector('footer [contenteditable="true"]')
                 or await page.query_selector('[contenteditable="true"][data-tab="10"]')
@@ -210,7 +193,7 @@ async def send_reply(page, text: str) -> bool:
             print("[SEND ERROR] Input box not found.", flush=True)
             return False
 
-        await input_box.click(force=True)
+        await input_box.click(force=True, timeout=4000)
         await asyncio.sleep(0.3)
 
         lines = text.split("\n")
@@ -232,103 +215,86 @@ async def send_reply(page, text: str) -> bool:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# MESSAGE EXTRACTOR
+# MESSAGE EXTRACTOR (100% Reliable DOM Classification)
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def extract_chat_messages(page) -> list:
     """
-    Returns list of {text, isOut} for all visible messages in div#main.
-    De-duplicates consecutive identical messages.
+    Returns list of dicts for all messages in the open chat:
+    [{ 'text': str, 'rawText': str, 'hasImg': bool, 'hasDoc': bool, 'docName': str, 'isOut': bool }]
+    Strictly separates incoming customer messages from outgoing bot messages.
     """
     return await page.evaluate('''() => {
-        const rows = Array.from(document.querySelectorAll(
-            'div#main div[role="row"], div#main .message-in, div#main .message-out'
-        ));
+        const bubbles = Array.from(document.querySelectorAll('div#main div.message-in, div#main div.message-out'));
         const results = [];
-        const seen = new Set();
-        for (const r of rows) {
-            const textEl = r.querySelector('span.selectable-text') || r.querySelector('.copyable-text');
+        for (const b of bubbles) {
+            const isOut = b.classList.contains('message-out') || !!b.closest('.message-out');
+            const textEl = b.querySelector('span.selectable-text') || b.querySelector('.copyable-text');
             const text = textEl ? textEl.innerText.trim() : '';
-            if (!text) continue;
-            const key = text.slice(0, 80);
-            if (seen.has(key)) continue;
-            seen.add(key);
-            const isOut = (
-                r.classList.contains('message-out') ||
-                !!r.closest('.message-out') ||
-                (r.dataset && r.dataset.id && r.dataset.id.startsWith('true_'))
+            const hasImg = !!b.querySelector('img[src*="blob:"]');
+            const docEl = b.querySelector('span[title], div[title]');
+            const docName = docEl ? (docEl.getAttribute('title') || '') : '';
+            const hasDoc = docName.includes('.') && (
+                docName.endsWith('.pdf') || docName.endsWith('.docx') || docName.endsWith('.doc') ||
+                docName.endsWith('.xlsx') || docName.endsWith('.xls') || docName.endsWith('.csv') ||
+                docName.endsWith('.txt')
             );
-            results.push({ text, isOut });
+            if (text || hasImg || hasDoc) {
+                results.push({
+                    text: text || (hasDoc ? `[Document: ${docName}]` : '[Image Attached]'),
+                    rawText: text,
+                    hasImg: hasImg,
+                    hasDoc: hasDoc,
+                    docName: docName,
+                    isOut: isOut
+                });
+            }
         }
         return results;
     }''')
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# MEDIA COLLECTOR — download and analyze ALL customer images/files in the chat
+# MEDIA COLLECTOR (Fast & Safe — No Blocking Downloads)
 # ──────────────────────────────────────────────────────────────────────────────
 
-async def collect_all_media_text(page, phone: str) -> tuple:
+async def collect_customer_media_ocr(page, phone: str) -> tuple:
     """
-    Finds ALL customer images and documents currently visible in div#main.
-    Downloads them, runs OCR/extraction on each, and returns combined text.
-
-    Returns:
-        (combined_ocr_text: str, has_any_media: bool)
+    Screenshots all customer images/photos in div#main and runs OCR.
+    Collects document names without hanging or opening modals.
+    Returns (ocr_text: str, has_media: bool)
     """
     all_text_parts = []
     has_media = False
 
-    # ── Images (photos, screenshots) ──────────────────────────────────────────
-    img_els = await page.query_selector_all('div#main .message-in img[src*="blob:"]')
-    for i, img_el in enumerate(img_els):
-        try:
-            ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
-            save_path = os.path.join(FILES_DIR, f"{phone}_{ts}_{i}.png")
-            await img_el.screenshot(path=save_path)
-            ocr_text = run_image_ocr(save_path)
-            if ocr_text.strip():
-                all_text_parts.append(ocr_text)
-                print(f"[MEDIA] Image {i+1} OCR extracted {len(ocr_text)} chars", flush=True)
-            has_media = True
-        except Exception as e:
-            print(f"[OCR] Image {i+1} error: {e}", flush=True)
-
-    # ── Documents (PDF, Word, Excel, etc.) ────────────────────────────────────
-    # WhatsApp shows document name in span[title] or div[title] inside .message-in
-    doc_els = await page.query_selector_all('div#main .message-in span[title], div#main .message-in div[title]')
-    for doc_el in doc_els:
-        doc_name = (await doc_el.get_attribute("title") or "").strip()
-        if not doc_name:
-            continue
-        ext = os.path.splitext(doc_name)[1].lower()
-        if ext not in (".pdf", ".docx", ".doc", ".xlsx", ".xls", ".csv", ".txt", ".png", ".jpg", ".jpeg"):
-            continue
-
-        # Try to find a download button near this doc element
-        try:
-            download_btn = await doc_el.evaluate_handle(
-                'el => el.closest("div[role=\'button\']") || '
-                'el.closest("[data-icon=\'download\']") || '
-                'el.parentElement.querySelector("[data-icon=\'download\']")'
-            )
-            btn_el = download_btn.as_element()
-            if btn_el:
-                async with page.expect_download() as dl_info:
-                    await btn_el.click()
-                dl = await dl_info.value
-                save_path = os.path.join(FILES_DIR, f"{phone}_{doc_name}")
-                await dl.save_as(save_path)
-                _, raw_text = analyze_file(save_path, ext)
-                if raw_text.strip():
-                    all_text_parts.append(raw_text)
-                    print(f"[MEDIA] Document '{doc_name}' extracted {len(raw_text)} chars", flush=True)
+    # 1. Images & photos (take screenshot directly of element, run OCR)
+    try:
+        img_els = await page.query_selector_all('div#main .message-in img[src*="blob:"]')
+        for i, img_el in enumerate(img_els[-3:]):  # Process up to 3 recent images
+            try:
+                ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
+                save_path = os.path.join(FILES_DIR, f"{phone}_{ts}_{i}.png")
+                await img_el.screenshot(path=save_path, timeout=3000)
+                ocr_result = run_image_ocr(save_path)
+                if ocr_result.strip():
+                    all_text_parts.append(ocr_result)
+                    print(f"         📷 Image OCR extracted {len(ocr_result)} chars", flush=True)
                 has_media = True
-        except Exception as e:
-            print(f"[MEDIA] Doc '{doc_name}' download/extract: {e}", flush=True)
-            # Fall back: at least note the document name
-            all_text_parts.append(f"Document: {doc_name}")
-            has_media = True
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 2. Documents (extract title/name from bubble)
+    try:
+        doc_els = await page.query_selector_all('div#main .message-in span[title], div#main .message-in div[title]')
+        for doc_el in doc_els:
+            doc_name = (await doc_el.get_attribute("title") or "").strip()
+            if doc_name and "." in doc_name:
+                all_text_parts.append(f"Document attached: {doc_name}")
+                has_media = True
+    except Exception:
+        pass
 
     return "\n\n".join(all_text_parts), has_media
 
@@ -338,17 +304,9 @@ async def collect_all_media_text(page, phone: str) -> tuple:
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def process_active_chat(page) -> None:
-    """
-    Main processing logic for the chat open in div#main.
-    - Detects new customer messages (text + any media)
-    - Waits for 2s stop-typing silence
-    - Validates content per step
-    - Sends appropriate reply
-    - Logs extracted data to 8-column Excel
-    """
     global _last_seen
 
-    # ── Get contact info ───────────────────────────────────────────────────────
+    # ── Get contact info from header ───────────────────────────────────────────
     header_el = (
         await page.query_selector('header span[title]')
         or await page.query_selector('header div[role="button"] span')
@@ -368,35 +326,35 @@ async def process_active_chat(page) -> None:
     if not phone:
         phone = "91" + re.sub(r'[^0-9]', '', str(abs(hash(contact_title))))[:10]
 
-    # ── Extract all visible messages ───────────────────────────────────────────
+    # ── Extract all messages in chat ───────────────────────────────────────────
     messages = await extract_chat_messages(page)
     if not messages:
         return
 
-    # Get all incoming messages (customer's)
+    # ONLY incoming customer messages (bot messages have isOut=True)
     incoming = [m for m in messages if not m['isOut']]
     if not incoming:
         return
 
     latest_msg = incoming[-1]['text']
 
-    # ── Filter out bot's own reply being misclassified ─────────────────────────
+    # Filter out any rare misclassified bot reply
     if _is_bot_reply(latest_msg):
         return
 
-    # ── Deduplication ──────────────────────────────────────────────────────────
+    # Deduplication — skip if message has not changed
     prev = _last_seen.get(phone, {})
     if prev.get("text") == latest_msg:
-        return  # Same message — nothing new
+        return
 
-    # ── New message detected! ──────────────────────────────────────────────────
+    # New message detected from customer!
     _last_seen[phone] = {"text": latest_msg, "arrived_at": time.time()}
     record_customer_message_time(phone)
 
     now_str = datetime.now(IST).strftime("%H:%M:%S")
     print(f"\n[{now_str}] 📩 New msg from {name} ({phone}): '{latest_msg[:60]}'", flush=True)
 
-    # ── State machine ──────────────────────────────────────────────────────────
+    # State transition check
     current_step, can_advance = register_customer_incoming_message(phone, latest_msg)
 
     if not can_advance:
@@ -413,7 +371,6 @@ async def process_active_chat(page) -> None:
         success = await send_reply(page, get_step_message(1))
         if success:
             mark_bot_reply_sent(phone, 1, triggered_by_text=latest_msg)
-            # Log first contact — name from WhatsApp profile, no requirements yet
             log_customer_lead(
                 sender_phone=phone,
                 sender_name=name,
@@ -428,11 +385,8 @@ async def process_active_chat(page) -> None:
     # STEP 1 or STEP 2: Wait for stop-typing (2s silence), then validate & reply
     # ══════════════════════════════════════════════════════════════════════════
     if current_step in (1, 2):
-        print(f"         ⏳ Step {current_step}: waiting for customer to stop sending ({TYPING_SILENCE_S}s silence)...", flush=True)
+        print(f"         ⏳ Step {current_step}: waiting for customer to finish ({TYPING_SILENCE_S}s silence)...", flush=True)
 
-        # ── Poll until customer has been silent for TYPING_SILENCE_S seconds ──
-        # If customer keeps sending (texts, photos, files) — keep waiting.
-        # If customer stops replying entirely — bot also stops (no auto reply).
         silence_start = time.time()
         while True:
             await asyncio.sleep(0.5)
@@ -441,112 +395,83 @@ async def process_active_chat(page) -> None:
             incoming_now = [m for m in msgs_now if not m['isOut'] and not _is_bot_reply(m['text'])]
 
             if incoming_now and incoming_now[-1]['text'] != latest_msg:
-                # Customer sent more — reset silence timer, keep waiting
                 latest_msg = incoming_now[-1]['text']
                 _last_seen[phone]["text"] = latest_msg
                 record_customer_message_time(phone)
                 silence_start = time.time()
-                print(f"         📝 Customer still sending... waiting for silence.", flush=True)
+                print(f"         📝 Customer still sending... resetting silence timer.", flush=True)
                 continue
 
             if (time.time() - silence_start) >= TYPING_SILENCE_S:
-                break  # Customer stopped for 2s — now process
+                break
 
-        print(f"         ✓ Customer stopped. Collecting all messages and media...", flush=True)
+        print(f"         ✓ Customer stopped. Processing requirements & media...", flush=True)
 
-        # ── Collect ALL customer text messages (up to last 10) ────────────────
+        # Collect customer text (recent incoming messages)
         all_msgs_final = await extract_chat_messages(page)
         all_incoming   = [m['text'] for m in all_msgs_final if not m['isOut'] and not _is_bot_reply(m['text'])]
-        combined_customer_text = "\n".join(all_incoming[-10:])
+        combined_text  = "\n".join(all_incoming[-8:])
 
-        # ── Collect ALL customer media (images, docs, screenshots, PDFs, etc.) ─
-        ocr_text, has_media = await collect_all_media_text(page, phone)
+        # OCR from images / document detection
+        ocr_text, has_media = await collect_customer_media_ocr(page, phone)
 
-        # Pause before sending reply
         await asyncio.sleep(REPLY_DELAY_S)
 
-        # ══════════════════════════════════════════════════════════════════════
-        # STEP 1: Customer should share product requirements
-        # ══════════════════════════════════════════════════════════════════════
+        # ── STEP 1: Requirements validation ──────────────────────────────────
         if current_step == 1:
-            valid = validate_step1_reply(combined_customer_text, has_image=has_media, has_document=has_media)
+            valid = validate_step1_reply(combined_text, has_image=has_media, has_document=has_media)
 
             if valid:
-                # Parse product requirements from all customer text + OCR text
-                from document_analyzer import parse_product_details
-                all_text_for_req = "\n".join(filter(None, [combined_customer_text, ocr_text]))
+                all_text_for_req = "\n".join(filter(None, [combined_text, ocr_text]))
                 parsed_req = parse_product_details(all_text_for_req)
-                # If parser didn't extract structured items, use raw customer text (cleaned)
                 if not parsed_req:
-                    parsed_req = combined_customer_text[:1000]
+                    # Filter out filler words, use clean customer text
+                    parsed_req = "\n".join(line for line in combined_text.splitlines() if len(line.strip()) > 3)[:1000]
 
-                # Save to Excel: requirements + any entity data found in text
                 log_customer_lead(
                     sender_phone=phone,
                     sender_name=name,
-                    message_text=combined_customer_text,
+                    message_text=combined_text,
                     ocr_text=ocr_text,
                     requirements=parsed_req,
                 )
 
-                # Send Step 2
                 success = await send_reply(page, get_step_message(2))
                 if success:
                     mark_bot_reply_sent(phone, 2, triggered_by_text=latest_msg)
                     print(f"         ✅ Step 2 sent to {phone}!", flush=True)
             else:
-                # Customer sent irrelevant data — send specific error message
-                error_msg = (
-                    "⚠️ *Please share your product requirements correctly!*\n\n"
-                    "We need the following details to prepare your quotation:\n"
-                    "📦 *Product name* and description\n"
-                    "🔢 *Quantity* required\n"
-                    "📐 *Size / Specifications*\n\n"
-                    "📎 You can also share a *photo, catalogue, PDF or any document*."
-                )
+                error_msg = get_retry_message(1)
                 await send_reply(page, error_msg)
                 mark_bot_reply_sent(phone, 1, triggered_by_text=latest_msg)
-                print(f"         ⚠ Requirements error message sent to {phone}.", flush=True)
+                print(f"         ⚠️ Requirements error message sent to {phone}.", flush=True)
 
-        # ══════════════════════════════════════════════════════════════════════
-        # STEP 2: Customer should share business details
-        # ══════════════════════════════════════════════════════════════════════
+        # ── STEP 2: Business details validation ──────────────────────────────
         elif current_step == 2:
-            valid = validate_step2_reply(combined_customer_text, has_image=has_media, has_document=has_media)
+            valid = validate_step2_reply(combined_text, has_image=has_media, has_document=has_media)
 
             if valid:
-                # Save business details to Excel (same row, fills empty cells only)
                 log_customer_lead(
                     sender_phone=phone,
                     sender_name=name,
-                    message_text=combined_customer_text,
+                    message_text=combined_text,
                     ocr_text=ocr_text,
-                    requirements="",  # Don't overwrite requirements at this step
+                    requirements="",  # In-place update: keeps existing requirements
                 )
 
-                # Send Step 3
                 success = await send_reply(page, get_step_message(3))
                 if success:
                     mark_bot_reply_sent(phone, 3, triggered_by_text=latest_msg)
                     print(f"         ✅ Step 3 sent to {phone}! Flow complete.", flush=True)
             else:
-                # Customer didn't share business details — specific error message
-                error_msg = (
-                    "⚠️ *Please share your business details correctly!*\n\n"
-                    "We need the following to process your quotation:\n"
-                    "🏢 *Company / Business Name*\n"
-                    "📋 *GST Number* (if applicable)\n"
-                    "📍 *Complete Business Address* (with pin code)\n"
-                    "👤 *Contact Person Name*\n\n"
-                    "📎 You can also share a *visiting card or letterhead photo*."
-                )
+                error_msg = get_retry_message(2)
                 await send_reply(page, error_msg)
                 mark_bot_reply_sent(phone, 2, triggered_by_text=latest_msg)
-                print(f"         ⚠ Business details error message sent to {phone}.", flush=True)
+                print(f"         ⚠️ Business details error message sent to {phone}.", flush=True)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# OPEN UNREAD CHAT FROM SIDEBAR
+# SIDEBAR UNREAD CHAT OPENER
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def open_unread_chat(page, span_el) -> bool:
@@ -555,8 +480,8 @@ async def open_unread_chat(page, span_el) -> bool:
             'el => el.closest("div[role=\'listitem\']") || el.closest("div[tabindex]") || el.parentElement'
         )
         row_el = row.as_element() or span_el
-        await row_el.click(force=True)
-        await asyncio.sleep(2.0)
+        await row_el.click(force=True, timeout=5000)
+        await asyncio.sleep(1.5)
         return True
     except Exception as e:
         print(f"[OPEN CHAT ERROR] {e}", flush=True)
@@ -573,9 +498,9 @@ async def main():
     print("=" * 60, flush=True)
     print("  📱  Mode    : Local WhatsApp Web (Playwright)", flush=True)
     print("  💸  Cost    : ₹0.00 Forever", flush=True)
-    print("  ✅  Flow    : Step 1 → Step 2 → Step 3 (with validation)", flush=True)
-    print("  📊  Excel   : 9 columns — with Requirements Details", flush=True)
-    print("  📎  Media   : Photos, PDFs, Word, Excel, Screenshots supported", flush=True)
+    print("  ✅  Flow    : Step 1 → Step 2 → Step 3 (Strict Validation)", flush=True)
+    print("  📊  Excel   : 9 columns (with Requirements Details)", flush=True)
+    print("  📎  Media   : Photos, Screenshots, PDFs, Docs Supported", flush=True)
     print("=" * 60, flush=True)
 
     async with async_playwright() as p:
@@ -598,50 +523,57 @@ async def main():
 
         while True:
             try:
-                # ── Dismiss popups ─────────────────────────────────────────────
-                for _ in range(2):
-                    close_btn = await page.query_selector(
-                        'span[data-icon="x-alt"], span[data-icon="x"], button[aria-label="Close"]'
-                    )
-                    if close_btn:
-                        try: await close_btn.click(); await asyncio.sleep(0.3)
-                        except Exception: pass
+                # ── Dismiss popups or lightbox modals ──────────────────────────
+                close_btn = await page.query_selector(
+                    'span[data-icon="x-alt"], span[data-icon="x"], button[aria-label="Close"]'
+                )
+                if close_btn:
+                    try:
+                        await close_btn.click(timeout=2000)
+                        await asyncio.sleep(0.3)
+                    except Exception:
+                        pass
 
-                # ── Scan sidebar for ALL unread chats ──────────────────────────
+                # ── Scan sidebar for unread chats (exact rows only, deduplicated) ─
                 unread_chats = await page.evaluate('''() => {
-                    const spans = Array.from(document.querySelectorAll('div#pane-side span[title]'));
-                    return spans.map(s => {
-                        const title = s.getAttribute('title');
-                        const row = s.closest('div[role="listitem"]') || s.closest('div[tabindex]') || s.parentElement;
-                        const badge = row ? (
-                            row.querySelector('span[aria-label*="unread"]') ||
-                            row.querySelector('span[aria-label*="Unread"]')
-                        ) : null;
-                        return badge ? { title, label: badge.getAttribute('aria-label') } : null;
-                    }).filter(Boolean);
+                    const rows = Array.from(document.querySelectorAll('div#pane-side div[role="listitem"], div#pane-side div[tabindex="-1"]'));
+                    const unread = [];
+                    const seen = new Set();
+                    for (const r of rows) {
+                        const badge = r.querySelector('span[aria-label*="unread"]') || r.querySelector('span[aria-label*="Unread"]');
+                        if (badge) {
+                            const titleEl = r.querySelector('span[title]');
+                            const title = titleEl ? titleEl.getAttribute('title') : '';
+                            if (title && !seen.has(title)) {
+                                seen.add(title);
+                                unread.push({ title, label: badge.getAttribute('aria-label') });
+                            }
+                        }
+                    }
+                    return unread;
                 }''')
 
                 for uchat in unread_chats:
                     title = uchat['title']
-                    print(f"\n[UNREAD] Found: '{title}' ({uchat['label']})", flush=True)
+                    print(f"\n[UNREAD] Chat: '{title}' ({uchat['label']})", flush=True)
                     span_el = await page.query_selector(f'div#pane-side span[title="{title}"]')
                     if span_el:
                         opened = await open_unread_chat(page, span_el)
                         if opened:
                             await process_active_chat(page)
 
-                # ── Also check the currently visible open chat ──────────────────
+                # ── Also process the currently open active chat ────────────────
                 if await page.query_selector('div#main header'):
                     await process_active_chat(page)
 
-                # ── Flush pending Excel queue ───────────────────────────────────
+                # ── Flush pending Excel writes ──────────────────────────────────
                 flush_pending_excel_queue()
 
                 await asyncio.sleep(1.0)
 
             except Exception as e:
                 print(f"[LOOP ERROR] {e}", flush=True)
-                await asyncio.sleep(3.0)
+                await asyncio.sleep(2.0)
 
 
 if __name__ == "__main__":
