@@ -1,13 +1,16 @@
 """
-whatsapp_web_engine.py — 100% Free 24/7 WhatsApp Web Automation Engine.
+whatsapp_web_engine.py — 100% Free WhatsApp Web Automation Engine (Zero Meta Account Needed).
 
-CORE FEATURES:
-  1. data-pre-plain-text attribute extraction (100% reliable message & sender detection).
-  2. Direct DOM badge clicking for unread chats (no CSS string bugs).
-  3. Automatic 24/7 listening for incoming messages in both sidebar and active chat.
-  4. Step 1 → Step 2 → Step 3 flow with stop-typing silence detection (2s).
-  5. Error messages if required details are missing.
-  6. 9-column Excel logging (includes Requirements column, in-place update).
+Runs on your existing WhatsApp Business number (+91 6290 164 699) for ₹0.00 forever.
+Features:
+  1. No Meta account, No API tokens, No paid subscriptions needed.
+  2. data-pre-plain-text DOM extraction (100% accurate customer & bot message separation).
+  3. Real Playwright pointer clicks for unread chats in sidebar.
+  4. 1.5–2.0s stop-typing silence debounce before replying.
+  5. Multi-message electrical entity extractor (Products, Quantities, Specs, GSTIN, Address, Company, Name).
+  6. Exact 3 primary responses (Response 1, Response 2, Response 3) matching Master Prompt.
+  7. Exact 9-column Excel sync (in-place row updates, no duplicate rows).
+  8. Local SQLite + Live Admin Web Dashboard at http://localhost:8080/admin.
 """
 
 import os
@@ -25,68 +28,58 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
 
 from playwright.async_api import async_playwright
 
-from conversation_flow import (
-    register_customer_incoming_message,
-    record_customer_message_time,
-    mark_bot_reply_sent,
-    get_step_message,
-    get_retry_message,
-    validate_step1_reply,
-    validate_step2_reply,
-)
-from excel_logger import log_customer_lead, flush_pending_excel_queue
-from document_analyzer import parse_product_details, run_image_ocr
+from app.config import settings
+from app.ai.extractor import analyze_conversation
+from app.conversation.decision_engine import evaluate_conversation_completeness
+from app.conversation.templates import RESPONSE_1, RESPONSE_2, RESPONSE_3, get_response_template
+from app.conversation.state_machine import ConversationStage, ConversationStatus
+from app.exports.excel_exporter import sync_customer_to_excel
+from app.database.session import SessionLocal, init_db
+from app.database.models import Customer, Conversation, Message, ResponseLog, utc_now
+from app.documents.ocr_engine import run_image_ocr
 
 IST = timezone(timedelta(hours=5, minutes=30))
-BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
-SESSION_DIR = os.path.join(BASE_DIR, "data", "whatsapp_web_profile")
-FILES_DIR   = os.path.join(BASE_DIR, "data", "customer_files")
+BASE_DIR    = settings.BASE_DIR
+SESSION_DIR = os.path.join(settings.DATA_DIR, "whatsapp_web_profile")
+FILES_DIR   = os.path.join(settings.DATA_DIR, "customer_files")
 QR_IMAGE_PATH = os.path.join(os.path.expanduser("~"), "Desktop", "SCAN_WHATSAPP_QR.png")
 
 os.makedirs(SESSION_DIR, exist_ok=True)
 os.makedirs(FILES_DIR, exist_ok=True)
 
-STEP1_DELAY_S    = 2.0
-TYPING_SILENCE_S = 2.0
-REPLY_DELAY_S    = 2.0
+DEBOUNCE_SILENCE_S = settings.DEBOUNCE_SECONDS  # 1.5s
+REPLY_WAIT_S = 1.0
 
-_last_seen: dict = {}
+_last_processed_msg: dict = {}
+_last_sent_response: dict = {}
 
 BOT_REPLY_PREFIXES = (
-    "🙏 *Thank you for contacting us!",
-    "✅ *Thank you for sharing your requirements!",
-    "🙏 *Thanks for sharing all the details!",
     "🙏 *Thank you for sharing all your details!",
-    "📋 *Please share your product requirements!",
-    "🏢 *Please share your business details!",
-    "⚠️ *Please share your product requirements",
-    "⚠️ *Please share your business details",
+    "🙏 Thank you for sharing all your details!",
+    "🙏 *Thank you for contacting us!",
+    "🙏 Thank you for contacting us!",
+    "✅ *Thank you for sharing your requirements!",
+    "✅ Thank you for sharing your requirements!",
+    "Thank you for sharing all your details",
     "Thank you for contacting us",
     "Thank you for sharing your requirements",
-    "Thanks for sharing all the details",
-    "Please share your product requirements",
-    "Please share your business details",
 )
 
 
 def _start_cloud_health_server():
-    import http.server, socketserver, threading
-    port = int(os.environ.get("PORT", 8080))
-    class H(http.server.SimpleHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"WhatsApp 24/7 Engine ONLINE!")
-        def log_message(self, *a): pass
-    try:
-        srv = socketserver.TCPServer(("", port), H)
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        print(f"[HEALTH] Listening on port {port}", flush=True)
-    except Exception as e:
-        print(f"[HEALTH] {e}", flush=True)
+    """Starts background dashboard/health server on port 8080."""
+    import threading, uvicorn
+    def run_server():
+        try:
+            uvicorn.run("app.main:app", host="0.0.0.0", port=settings.PORT, log_level="warning")
+        except Exception as e:
+            print(f"[SERVER ERROR] {e}", flush=True)
+    t = threading.Thread(target=run_server, daemon=True)
+    t.start()
+    print(f"[HEALTH/ADMIN] Web Dashboard live on http://localhost:{settings.PORT}/admin", flush=True)
 
 _start_cloud_health_server()
+init_db()
 
 
 def sanitize_phone(raw: str) -> str:
@@ -100,7 +93,7 @@ def sanitize_phone(raw: str) -> str:
 
 def _is_bot_reply(text: str) -> bool:
     t = text.strip()
-    return any(t.startswith(p[:25]) for p in BOT_REPLY_PREFIXES)
+    return any(t.startswith(p[:20]) for p in BOT_REPLY_PREFIXES)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -108,13 +101,13 @@ def _is_bot_reply(text: str) -> bool:
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def wait_for_login(page) -> bool:
-    print("[SESSION] Checking WhatsApp Web login...", flush=True)
+    print("[SESSION] Checking WhatsApp Web session...", flush=True)
     attempt = 0
     qr_saved = False
     while True:
         attempt += 1
         if await page.query_selector('div#pane-side'):
-            print("[SESSION] ✅ Logged in!", flush=True)
+            print("[SESSION] ✅ Logged in to WhatsApp Web!", flush=True)
             if os.path.exists(QR_IMAGE_PATH):
                 try: os.remove(QR_IMAGE_PATH)
                 except Exception: pass
@@ -132,14 +125,8 @@ async def wait_for_login(page) -> bool:
         if qr_el:
             try:
                 await qr_el.screenshot(path=QR_IMAGE_PATH)
-                try:
-                    from PIL import Image, ImageOps
-                    with Image.open(QR_IMAGE_PATH) as im:
-                        ImageOps.expand(im, border=45, fill="white").save(QR_IMAGE_PATH)
-                except Exception:
-                    pass
                 if not qr_saved:
-                    print(f"[QR] 📱 Please scan QR → saved to Desktop: {os.path.basename(QR_IMAGE_PATH)}", flush=True)
+                    print(f"[QR] 📱 Scan QR saved to Desktop: {os.path.basename(QR_IMAGE_PATH)}", flush=True)
                     qr_saved = True
             except Exception:
                 pass
@@ -173,7 +160,7 @@ async def send_reply(page, text: str) -> bool:
             input_box = all_editable[-1] if all_editable else None
 
         if not input_box:
-            print("[SEND ERROR] Input box not found.", flush=True)
+            print("[SEND ERROR] WhatsApp input box not found.", flush=True)
             return False
 
         await input_box.click(force=True, timeout=4000)
@@ -198,21 +185,15 @@ async def send_reply(page, text: str) -> bool:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# BULLETPROOF MESSAGE EXTRACTOR (Using data-pre-plain-text & DOM)
+# MESSAGE EXTRACTOR (Using data-pre-plain-text & DOM)
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def extract_chat_messages(page) -> list:
-    """
-    Extracts all messages from the open chat in div#main.
-    Uses official WhatsApp data-pre-plain-text attribute to strictly identify
-    sender and outgoing (You) vs incoming (Customer) status.
-    """
     return await page.evaluate('''() => {
         const results = [];
         const main = document.querySelector('div#main');
         if (!main) return results;
 
-        // 1. Text messages (have data-pre-plain-text)
         const textNodes = Array.from(main.querySelectorAll('div.copyable-text[data-pre-plain-text]'));
         for (const el of textNodes) {
             const pre = el.getAttribute('data-pre-plain-text') || '';
@@ -223,23 +204,19 @@ async def extract_chat_messages(page) -> list:
                 results.push({
                     text: text,
                     isOut: isOut,
-                    hasImg: false,
-                    hasDoc: false
+                    hasImg: false
                 });
             }
         }
 
-        // 2. Images & media (check if any image is present in incoming bubbles)
         const imgs = Array.from(main.querySelectorAll('img[src*="blob:"]'));
         for (const img of imgs) {
             const closestRow = img.closest('div[role="row"]') || img.parentElement;
-            // If the row doesn't have an outgoing mark
             const isOut = closestRow ? (closestRow.innerText.includes('You:') || closestRow.className.includes('out')) : false;
             results.push({
-                text: '[Image / Photo Attached]',
+                text: '[Image Attached]',
                 isOut: isOut,
-                hasImg: true,
-                hasDoc: false
+                hasImg: true
             });
         }
 
@@ -248,39 +225,11 @@ async def extract_chat_messages(page) -> list:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# MEDIA OCR COLLECTOR
-# ──────────────────────────────────────────────────────────────────────────────
-
-async def collect_customer_media_ocr(page, phone: str) -> tuple:
-    all_text_parts = []
-    has_media = False
-
-    try:
-        img_els = await page.query_selector_all('div#main img[src*="blob:"]')
-        for i, img_el in enumerate(img_els[-3:]):
-            try:
-                ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
-                save_path = os.path.join(FILES_DIR, f"{phone}_{ts}_{i}.png")
-                await img_el.screenshot(path=save_path, timeout=3000)
-                ocr_result = run_image_ocr(save_path)
-                if ocr_result.strip():
-                    all_text_parts.append(ocr_result)
-                    print(f"         📷 Image OCR extracted {len(ocr_result)} chars", flush=True)
-                has_media = True
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    return "\n\n".join(all_text_parts), has_media
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# PROCESS ACTIVE CHAT
+# PROCESS ACTIVE CHAT PIPELINE
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def process_active_chat(page) -> None:
-    global _last_seen
+    global _last_processed_msg, _last_sent_response
 
     header_el = await page.query_selector('div#main header')
     if not header_el:
@@ -302,7 +251,7 @@ async def process_active_chat(page) -> None:
     if not messages:
         return
 
-    # ONLY incoming customer messages
+    # Inbound customer messages only
     incoming = [m for m in messages if not m['isOut']]
     if not incoming:
         return
@@ -312,124 +261,142 @@ async def process_active_chat(page) -> None:
     if _is_bot_reply(latest_msg):
         return
 
-    prev = _last_seen.get(phone, {})
-    if prev.get("text") == latest_msg:
+    # Check if we already processed this exact latest message
+    if _last_processed_msg.get(phone) == latest_msg:
         return
-
-    _last_seen[phone] = {"text": latest_msg, "arrived_at": time.time()}
-    record_customer_message_time(phone)
 
     now_str = datetime.now(IST).strftime("%H:%M:%S")
-    print(f"\n[{now_str}] 📩 New msg from {name} ({phone}): '{latest_msg[:60]}'", flush=True)
+    print(f"\n[{now_str}] 📩 New customer interaction from {name} ({phone}): '{latest_msg[:60]}'", flush=True)
 
-    current_step, can_advance = register_customer_incoming_message(phone, latest_msg)
+    # ── DEBOUNCE: Wait for 1.5–2.0s of silence after customer stops typing ─────
+    print(f"         ⏳ Waiting {DEBOUNCE_SILENCE_S}s silence for customer burst to finish...", flush=True)
+    silence_start = time.time()
+    while True:
+        await asyncio.sleep(0.4)
+        msgs_now = await extract_chat_messages(page)
+        incoming_now = [m for m in msgs_now if not m['isOut'] and not _is_bot_reply(m['text'])]
 
-    if not can_advance:
-        print(f"         [WAIT] Step {current_step} — waiting for customer's next reply.", flush=True)
+        if incoming_now and incoming_now[-1]['text'] != latest_msg:
+            latest_msg = incoming_now[-1]['text']
+            silence_start = time.time()
+            print(f"         📝 Customer still sending... resetting silence timer.", flush=True)
+            continue
+
+        if (time.time() - silence_start) >= DEBOUNCE_SILENCE_S:
+            break
+
+    print(f"         ✓ Customer stopped typing. Analyzing complete conversation...", flush=True)
+    _last_processed_msg[phone] = latest_msg
+
+    # ── COLLECT ALL CHAT TEXT & OCR FROM IMAGES ───────────────────────────────
+    all_msgs_final = await extract_chat_messages(page)
+    all_incoming_texts = [m['text'] for m in all_msgs_final if not m['isOut'] and not _is_bot_reply(m['text'])]
+    has_media = any(m.get('hasImg') for m in all_msgs_final if not m['isOut'])
+
+    ocr_text = ""
+    if has_media:
+        try:
+            img_els = await page.query_selector_all('div#main img[src*="blob:"]')
+            for i, img_el in enumerate(img_els[-2:]):
+                ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
+                save_path = os.path.join(FILES_DIR, f"{phone}_{ts}_{i}.png")
+                await img_el.screenshot(path=save_path, timeout=3000)
+                extracted_ocr = run_image_ocr(save_path)
+                if extracted_ocr:
+                    ocr_text += f"\n{extracted_ocr}"
+                    print(f"         📷 OCR extracted {len(extracted_ocr)} chars", flush=True)
+        except Exception:
+            pass
+
+    # ── AI/NLP EXTRACTION ACROSS COMPLETE CONVERSATION ─────────────────────────
+    attachment_texts = [ocr_text] if ocr_text else None
+    extraction = analyze_conversation(
+        messages_history=all_incoming_texts,
+        attachment_texts=attachment_texts,
+        profile_name=name if name != "Customer" else None
+    )
+
+    # ── DECISION ENGINE: EVALUATE COMPLETENESS & SELECT RESPONSE ───────────────
+    response_type, audit_meta = evaluate_conversation_completeness(extraction, has_media=has_media)
+    reply_text = get_response_template(response_type)
+
+    # Avoid duplicate identical response if state has not changed
+    if _last_sent_response.get(phone) == response_type:
+        print(f"         [SILENT] State {response_type} already sent. Waiting for new details.", flush=True)
         return
 
-    # ── STEP 0: First message → reply Step 1 after 2s ────────────────────────
-    if current_step == 0:
-        print(f"         ⏳ First message → sending Step 1 in {STEP1_DELAY_S}s...", flush=True)
-        await asyncio.sleep(STEP1_DELAY_S)
+    # ── SEND EXACT PRIMARY RESPONSE ───────────────────────────────────────────
+    await asyncio.sleep(REPLY_WAIT_S)
+    success = await send_reply(page, reply_text)
+    if success:
+        _last_sent_response[phone] = response_type
+        print(f"         ✅ Sent {response_type} to {phone}!", flush=True)
 
-        success = await send_reply(page, get_step_message(1))
-        if success:
-            mark_bot_reply_sent(phone, 1, triggered_by_text=latest_msg)
-            log_customer_lead(
-                sender_phone=phone,
-                sender_name=name,
-                message_text=latest_msg,
-                ocr_text="",
-                requirements="",
+    # ── DATABASE & 9-COLUMN EXCEL SYNCHRONIZATION ───────────────────────────────
+    db = SessionLocal()
+    try:
+        customer = db.query(Customer).filter(Customer.whatsapp_number == phone).first()
+        if not customer:
+            customer = Customer(
+                whatsapp_number=phone,
+                contact_person_name=extraction.contact_person_name or name,
+                first_contact_at=utc_now(),
+                last_contact_at=utc_now()
             )
-            print(f"         ✅ Step 1 sent to {phone}!", flush=True)
-        return
+            db.add(customer)
+            db.commit()
+            db.refresh(customer)
 
-    # ── STEP 1 or STEP 2: Stop-typing silence wait → validate → reply ─────────
-    if current_step in (1, 2):
-        print(f"         ⏳ Step {current_step}: waiting for customer to finish ({TYPING_SILENCE_S}s silence)...", flush=True)
+        if extraction.contact_person_name:
+            customer.contact_person_name = extraction.contact_person_name
+        if extraction.email_id:
+            customer.email = extraction.email_id
+        if extraction.company_business_name:
+            customer.company_name = extraction.company_business_name
+        if extraction.gst_number:
+            customer.gst_number = extraction.gst_number
+        if extraction.complete_address:
+            customer.complete_address = extraction.complete_address
 
-        silence_start = time.time()
-        while True:
-            await asyncio.sleep(0.5)
+        req_summary = extraction.format_requirements_summary()
+        if req_summary:
+            customer.requirements_summary = req_summary
 
-            msgs_now = await extract_chat_messages(page)
-            incoming_now = [m for m in msgs_now if not m['isOut'] and not _is_bot_reply(m['text'])]
+        customer.last_contact_at = utc_now()
+        db.commit()
 
-            if incoming_now and incoming_now[-1]['text'] != latest_msg:
-                latest_msg = incoming_now[-1]['text']
-                _last_seen[phone]["text"] = latest_msg
-                record_customer_message_time(phone)
-                silence_start = time.time()
-                print(f"         📝 Customer still sending... resetting silence timer.", flush=True)
-                continue
+        # Update Conversation Stage
+        conv = (
+            db.query(Conversation)
+            .filter(Conversation.customer_id == customer.id, Conversation.status == ConversationStatus.ACTIVE.value)
+            .order_by(Conversation.id.desc())
+            .first()
+        )
+        if not conv:
+            conv = Conversation(customer_id=customer.id, status=ConversationStatus.ACTIVE.value, stage=ConversationStage.NEW.value)
+            db.add(conv)
+            db.commit()
+            db.refresh(conv)
 
-            if (time.time() - silence_start) >= TYPING_SILENCE_S:
-                break
+        if response_type == "RESPONSE_1":
+            conv.stage = ConversationStage.COMPLETED.value
+            conv.status = ConversationStatus.COMPLETED.value
+            conv.completed_at = utc_now()
+        elif response_type == "RESPONSE_2":
+            conv.stage = ConversationStage.WAITING_FOR_PRODUCT_REQUIREMENTS.value
+        elif response_type == "RESPONSE_3":
+            conv.stage = ConversationStage.WAITING_FOR_CUSTOMER_DETAILS.value
 
-        print(f"         ✓ Customer stopped. Processing requirements & media...", flush=True)
+        db.commit()
 
-        all_msgs_final = await extract_chat_messages(page)
-        all_incoming   = [m['text'] for m in all_msgs_final if not m['isOut'] and not _is_bot_reply(m['text'])]
-        combined_text  = "\n".join(all_incoming[-8:])
+        # Save to 9-column Excel & Live CSV (in-place row updates)
+        sync_customer_to_excel(customer)
+        print(f"         📊 Synced {phone} to 9-column Excel & Database!", flush=True)
 
-        ocr_text, has_media = await collect_customer_media_ocr(page, phone)
-
-        await asyncio.sleep(REPLY_DELAY_S)
-
-        # ── Step 1: Requirements validation ──────────────────────────────────
-        if current_step == 1:
-            has_image_attached = any(m.get('hasImg') for m in all_msgs_final if not m['isOut']) or has_media
-            valid = validate_step1_reply(combined_text, has_image=has_image_attached, has_document=has_media)
-
-            if valid:
-                all_text_for_req = "\n".join(filter(None, [combined_text, ocr_text]))
-                parsed_req = parse_product_details(all_text_for_req)
-                if not parsed_req:
-                    parsed_req = "\n".join(line for line in combined_text.splitlines() if len(line.strip()) > 3)[:1000]
-
-                log_customer_lead(
-                    sender_phone=phone,
-                    sender_name=name,
-                    message_text=combined_text,
-                    ocr_text=ocr_text,
-                    requirements=parsed_req,
-                )
-
-                success = await send_reply(page, get_step_message(2))
-                if success:
-                    mark_bot_reply_sent(phone, 2, triggered_by_text=latest_msg)
-                    print(f"         ✅ Step 2 sent to {phone}!", flush=True)
-            else:
-                error_msg = get_retry_message(1)
-                await send_reply(page, error_msg)
-                mark_bot_reply_sent(phone, 1, triggered_by_text=latest_msg)
-                print(f"         ⚠️ Requirements error message sent to {phone}.", flush=True)
-
-        # ── Step 2: Business details validation ──────────────────────────────
-        elif current_step == 2:
-            has_image_attached = any(m.get('hasImg') for m in all_msgs_final if not m['isOut']) or has_media
-            valid = validate_step2_reply(combined_text, has_image=has_image_attached, has_document=has_media)
-
-            if valid:
-                log_customer_lead(
-                    sender_phone=phone,
-                    sender_name=name,
-                    message_text=combined_text,
-                    ocr_text=ocr_text,
-                    requirements="",
-                )
-
-                success = await send_reply(page, get_step_message(3))
-                if success:
-                    mark_bot_reply_sent(phone, 3, triggered_by_text=latest_msg)
-                    print(f"         ✅ Step 3 sent to {phone}! Flow complete.", flush=True)
-            else:
-                error_msg = get_retry_message(2)
-                await send_reply(page, error_msg)
-                mark_bot_reply_sent(phone, 2, triggered_by_text=latest_msg)
-                print(f"         ⚠️ Business details error message sent to {phone}.", flush=True)
+    except Exception as e:
+        print(f"[DB/EXCEL SYNC ERROR] {e}", flush=True)
+    finally:
+        db.close()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -438,13 +405,14 @@ async def process_active_chat(page) -> None:
 
 async def main():
     print("=" * 60, flush=True)
-    print("  🤖  WhatsApp Free Bot — 100% Automatic 24/7", flush=True)
+    print("  🤖 WhatsApp Automation System — 100% FREE (NO META ACCOUNT)", flush=True)
     print("=" * 60, flush=True)
-    print("  📱  Mode    : Local WhatsApp Web (Playwright)", flush=True)
-    print("  💸  Cost    : ₹0.00 Forever", flush=True)
-    print("  ✅  Flow    : Step 1 → Step 2 → Step 3 (Strict Validation)", flush=True)
-    print("  📊  Excel   : 9 columns (with Requirements Details)", flush=True)
-    print("  📎  Media   : Photos, Screenshots, PDFs, Docs Supported", flush=True)
+    print("  📱 Phone    : +91 6290 164 699 (Existing WhatsApp Business)", flush=True)
+    print("  💸 Cost     : ₹0.00 Forever (No Meta, No Paid APIs)", flush=True)
+    print("  ⚡ Debounce : 1.5s silence before replying to message bursts", flush=True)
+    print("  📋 Flow     : Exact 3 Master Responses (Response 1, 2, 3)", flush=True)
+    print("  📊 Excel    : 9 Columns In-Place Row Sync", flush=True)
+    print("  🌐 Dashboard: http://localhost:8080/admin", flush=True)
     print("=" * 60, flush=True)
 
     async with async_playwright() as p:
@@ -460,10 +428,10 @@ async def main():
         await page.goto("https://web.whatsapp.com", wait_until="domcontentloaded")
 
         if not await wait_for_login(page):
-            print("[ERROR] Login timeout. Restart and scan QR code.", flush=True)
+            print("[ERROR] Login timeout. Please restart.", flush=True)
             return
 
-        print("\n🟢 Engine ACTIVE — Listening 24/7 for customer messages...\n", flush=True)
+        print("\n🟢 Engine ONLINE — Listening 24/7 for customer messages...\n", flush=True)
 
         while True:
             try:
@@ -478,13 +446,13 @@ async def main():
                     except Exception:
                         pass
 
-                # ── Scan sidebar for unread badges and click directly with Playwright ──
+                # ── Scan sidebar for unread badges and click with Playwright ───
                 badge = await page.query_selector(
                     'div#pane-side span[aria-label*="unread"], div#pane-side span[aria-label*="Unread"]'
                 )
                 if badge:
                     label = await badge.get_attribute("aria-label") or "unread message"
-                    print(f"\n[UNREAD] Clicking unread chat ({label})...", flush=True)
+                    print(f"\n[UNREAD] Opening unread chat ({label})...", flush=True)
                     try:
                         await badge.click(force=True, timeout=4000)
                         await asyncio.sleep(1.5)
@@ -495,9 +463,6 @@ async def main():
                 # ── Also process whatever chat is currently open in main ───────
                 if await page.query_selector('div#main header'):
                     await process_active_chat(page)
-
-                # ── Flush pending Excel writes ──────────────────────────────────
-                flush_pending_excel_queue()
 
                 await asyncio.sleep(1.0)
 
