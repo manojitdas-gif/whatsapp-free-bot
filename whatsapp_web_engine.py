@@ -50,7 +50,7 @@ os.makedirs(FILES_DIR, exist_ok=True)
 DEBOUNCE_SILENCE_S = settings.DEBOUNCE_SECONDS  # 1.5s
 REPLY_WAIT_S = 1.0
 
-_last_processed_msg: dict = {}
+_last_processed_id: dict = {}
 _last_sent_response: dict = {}
 
 BOT_REPLY_PREFIXES = (
@@ -189,37 +189,69 @@ async def send_reply(page, text: str) -> bool:
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def extract_chat_messages(page) -> list:
-    return await page.evaluate('''() => {
+    return await page.evaluate(r'''() => {
         const results = [];
         const main = document.querySelector('div#main');
         if (!main) return results;
 
-        const textNodes = Array.from(main.querySelectorAll('div.copyable-text[data-pre-plain-text]'));
-        for (const el of textNodes) {
-            const pre = el.getAttribute('data-pre-plain-text') || '';
-            const isOut = pre.includes('] You:') || pre.includes('] you:');
-            const spanText = el.querySelector('span.selectable-text') || el;
-            const text = spanText ? spanText.innerText.trim() : '';
-            if (text) {
+        // Select all message container rows
+        const rows = Array.from(main.querySelectorAll('div[data-id], div.message-in, div.message-out'));
+        const seenIds = new Set();
+
+        for (const row of rows) {
+            const dataId = row.getAttribute('data-id') || '';
+            if (dataId && seenIds.has(dataId)) continue;
+            if (dataId) seenIds.add(dataId);
+
+            let isOut = false;
+            if (dataId.startsWith('true_')) {
+                isOut = true;
+            } else if (dataId.startsWith('false_')) {
+                isOut = false;
+            } else if (row.classList.contains('message-out')) {
+                isOut = true;
+            } else if (row.classList.contains('message-in')) {
+                isOut = false;
+            } else {
+                const copyable = row.querySelector('div.copyable-text[data-pre-plain-text]');
+                const pre = copyable ? (copyable.getAttribute('data-pre-plain-text') || '') : '';
+                if (pre.includes('] You:') || pre.includes('] you:')) isOut = true;
+            }
+
+            // Check for text content
+            const textSpan = row.querySelector('span.selectable-text') || row.querySelector('div.copyable-text');
+            let text = textSpan ? textSpan.innerText.trim() : '';
+
+            // Check for image / photo
+            const hasImg = !!row.querySelector('img') || !!row.querySelector('div[data-testid="image-thumb"]') || !!row.querySelector('div[data-testid="media-content"]') || !!row.querySelector('span[data-icon="image"]');
+
+            // Check for document (PDF, Excel, Word)
+            const docEl = row.querySelector('div[title]') || row.querySelector('span[data-icon*="document"]') || row.querySelector('span[data-icon*="pdf"]');
+            const hasDoc = !!docEl;
+            const docTitle = docEl ? (docEl.getAttribute('title') || docEl.innerText || '') : '';
+
+            // Check for audio / voice note
+            const hasAudio = !!row.querySelector('span[data-icon*="audio"]') || !!row.querySelector('span[data-icon*="ptt"]');
+
+            if (!text) {
+                if (hasImg) text = '[Image / Photo Attached]';
+                else if (hasDoc) text = `[Document Attached: ${docTitle}]`;
+                else if (hasAudio) text = '[Voice Note Attached]';
+                else text = row.innerText.trim();
+            }
+
+            // Skip timestamps or empty bubbles
+            if (text && !/^(\d{1,2}:\d{2}\s*(AM|PM|am|pm)?)$/i.test(text)) {
                 results.push({
+                    id: dataId || ('msg_' + results.length),
                     text: text,
                     isOut: isOut,
-                    hasImg: false
+                    hasImg: hasImg,
+                    hasDoc: hasDoc,
+                    docTitle: docTitle
                 });
             }
         }
-
-        const imgs = Array.from(main.querySelectorAll('img[src*="blob:"]'));
-        for (const img of imgs) {
-            const closestRow = img.closest('div[role="row"]') || img.parentElement;
-            const isOut = closestRow ? (closestRow.innerText.includes('You:') || closestRow.className.includes('out')) : false;
-            results.push({
-                text: '[Image Attached]',
-                isOut: isOut,
-                hasImg: true
-            });
-        }
-
         return results;
     }''')
 
@@ -257,12 +289,13 @@ async def process_active_chat(page) -> None:
         return
 
     latest_msg = incoming[-1]['text']
+    latest_id  = incoming[-1].get('id', latest_msg)
 
     if _is_bot_reply(latest_msg):
         return
 
-    # Check if we already processed this exact latest message
-    if _last_processed_msg.get(phone) == latest_msg:
+    # Check if we already processed this exact incoming message
+    if _last_processed_id.get(phone) == latest_id:
         return
 
     now_str = datetime.now(IST).strftime("%H:%M:%S")
@@ -276,7 +309,8 @@ async def process_active_chat(page) -> None:
         msgs_now = await extract_chat_messages(page)
         incoming_now = [m for m in msgs_now if not m['isOut'] and not _is_bot_reply(m['text'])]
 
-        if incoming_now and incoming_now[-1]['text'] != latest_msg:
+        if incoming_now and incoming_now[-1].get('id', incoming_now[-1]['text']) != latest_id:
+            latest_id = incoming_now[-1].get('id', incoming_now[-1]['text'])
             latest_msg = incoming_now[-1]['text']
             silence_start = time.time()
             print(f"         📝 Customer still sending... resetting silence timer.", flush=True)
@@ -286,17 +320,17 @@ async def process_active_chat(page) -> None:
             break
 
     print(f"         ✓ Customer stopped typing. Analyzing complete conversation...", flush=True)
-    _last_processed_msg[phone] = latest_msg
+    _last_processed_id[phone] = latest_id
 
     # ── COLLECT ALL CHAT TEXT & OCR FROM IMAGES ───────────────────────────────
     all_msgs_final = await extract_chat_messages(page)
     all_incoming_texts = [m['text'] for m in all_msgs_final if not m['isOut'] and not _is_bot_reply(m['text'])]
-    has_media = any(m.get('hasImg') for m in all_msgs_final if not m['isOut'])
+    has_media = any(m.get('hasImg') or m.get('hasDoc') for m in all_msgs_final if not m['isOut'])
 
     ocr_text = ""
     if has_media:
         try:
-            img_els = await page.query_selector_all('div#main img[src*="blob:"]')
+            img_els = await page.query_selector_all('div#main img')
             for i, img_el in enumerate(img_els[-2:]):
                 ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
                 save_path = os.path.join(FILES_DIR, f"{phone}_{ts}_{i}.png")
@@ -319,11 +353,6 @@ async def process_active_chat(page) -> None:
     # ── DECISION ENGINE: EVALUATE COMPLETENESS & SELECT RESPONSE ───────────────
     response_type, audit_meta = evaluate_conversation_completeness(extraction, has_media=has_media)
     reply_text = get_response_template(response_type)
-
-    # Avoid duplicate identical response if state has not changed
-    if _last_sent_response.get(phone) == response_type:
-        print(f"         [SILENT] State {response_type} already sent. Waiting for new details.", flush=True)
-        return
 
     # ── SEND EXACT PRIMARY RESPONSE ───────────────────────────────────────────
     await asyncio.sleep(REPLY_WAIT_S)
@@ -452,9 +481,10 @@ async def main():
                 )
                 if badge:
                     label = await badge.get_attribute("aria-label") or "unread message"
-                    print(f"\n[UNREAD] Opening unread chat ({label})...", flush=True)
                     try:
-                        await badge.click(force=True, timeout=4000)
+                        row_item = await badge.evaluate_handle('el => el.closest("div[role=\\"listitem\\"]") || el')
+                        elem = row_item.as_element() or badge
+                        await elem.click(force=True, timeout=4000)
                         await asyncio.sleep(1.5)
                         await process_active_chat(page)
                     except Exception as ce:
