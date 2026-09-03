@@ -19,7 +19,8 @@ def evaluate_conversation_completeness(extraction: ExtractionResult, has_media: 
     
     has_company = bool(extraction.company_business_name and len(extraction.company_business_name.strip()) >= 2)
     has_address = bool(extraction.complete_address and len(extraction.complete_address.strip()) >= 5)
-    has_contact = bool(extraction.contact_person_name and len(extraction.contact_person_name.strip()) >= 2)
+    # Contact person can be from profile/chat, or company name fallback
+    has_contact = bool((extraction.contact_person_name and len(extraction.contact_person_name.strip()) >= 2) or has_company)
     
     # GST rule
     gst_val = (extraction.gst_number or "").strip()
