@@ -111,6 +111,12 @@ COMPANY_INDICATORS = [
     "agency", "agencies", "co", "company", "hardware", "store", "shop", "solutions", "limited", "ltd", "pvt ltd", "llp"
 ]
 
+IGNORE_UI_PHRASES = (
+    "not a contact", "no common groups", "common groups", "click here",
+    "online", "typing", "last seen", "message yourself", "messages and calls",
+    "end-to-end", "encrypted", "disappearing", "mute notifications"
+)
+
 def extract_company_name(text: str) -> Optional[str]:
     if not text:
         return None
@@ -121,7 +127,7 @@ def extract_company_name(text: str) -> Optional[str]:
         lower = line_clean.lower()
         if any(lower.startswith(prefix) for prefix in ("company:", "business:", "firm:", "shop:", "company name:", "firm name:")):
             clean = re.sub(r'^(?:company name|firm name|company|business|firm|shop)[\s:-]+', '', line_clean, flags=re.IGNORECASE).strip()
-            if len(clean) >= 2:
+            if len(clean) >= 2 and not any(p in clean.lower() for p in IGNORE_UI_PHRASES):
                 return clean.title()
 
     # 2. Pattern: from <Company> or at <Company>
@@ -131,18 +137,25 @@ def extract_company_name(text: str) -> Optional[str]:
         re.IGNORECASE
     )
     if from_m:
-        return from_m.group(1).strip().title()
+        cand = from_m.group(1).strip()
+        if not any(p in cand.lower() for p in IGNORE_UI_PHRASES):
+            return cand.title()
 
     # 3. Line scan with indicator
     for line in text.splitlines():
         line_clean = line.strip()
         lower = line_clean.lower()
+        if any(p in lower for p in IGNORE_UI_PHRASES):
+            continue
+        # Exclude pure wattages or quantities
+        if re.match(r'^\d+\s*(?:watt|w|pcs|pc|mtr|meter|m)\b', lower):
+            continue
         if any(ind in lower for ind in COMPANY_INDICATORS) and len(line_clean) < 80:
             # Exclude lines that are clearly product orders
             if any(p in lower for p in ("bulb", "mcb", "wire", "cable", "quotation for", "invoice")):
                 continue
             clean = re.sub(r'^(?:company|business|firm|shop|org|name)[\s:-]+', '', line_clean, flags=re.IGNORECASE).strip()
-            if len(clean) >= 3:
+            if len(clean) >= 3 and not any(p in clean.lower() for p in IGNORE_UI_PHRASES):
                 return clean.title()
     return None
 
@@ -177,20 +190,26 @@ def extract_address(text: str) -> Optional[str]:
 
 # ── 6. CONTACT PERSON NAME EXTRACTION ─────────────────────────────────────────
 def extract_contact_name(text: str, profile_name: Optional[str] = None) -> Optional[str]:
+    # Check if profile name is already provided from WhatsApp profile
+    if profile_name and not any(p in profile_name.lower() for p in IGNORE_UI_PHRASES):
+        clean_prof = profile_name.strip()
+        if len(clean_prof) >= 2 and not clean_prof.replace('+', '').replace(' ', '').isdigit():
+            return clean_prof.title()
+
     if not text:
-        return profile_name or None
+        return None
     
     # 1. Pattern: I am <Name> from ... or My name is <Name>
     m = re.search(r'\b(?:my name is|i am|this is|contact person|contact|name is)[\s:-]+([A-Za-z]{2,20})(?:\s+from|\s*,|\s*$|\s*\n)', text, re.IGNORECASE)
     if m:
         candidate = m.group(1).strip()
-        if candidate.lower() not in ("here", "interested", "need", "we", "hi"):
+        if candidate.lower() not in ("here", "interested", "need", "we", "hi") and not any(p in candidate.lower() for p in IGNORE_UI_PHRASES):
             return candidate.title()
 
     m2 = re.search(r'\b(?:my name is|i am|this is|contact person|contact|name is)[\s:-]+([A-Za-z\s]{2,25})\b', text, re.IGNORECASE)
     if m2:
         candidate = m2.group(1).strip()
-        if candidate.lower() not in ("here", "interested", "need"):
+        if candidate.lower() not in ("here", "interested", "need") and not any(p in candidate.lower() for p in IGNORE_UI_PHRASES):
             return candidate.title()
         
-    return profile_name or None
+    return None
