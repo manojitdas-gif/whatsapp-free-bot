@@ -138,7 +138,19 @@ def extract_company_name(text: str) -> Optional[str]:
             if len(clean) >= 3 and len(clean) <= 60 and not any(p in clean.lower() for p in IGNORE_UI_PHRASES) and not any(p in clean.lower() for p in CHAT_CHATTER_PHRASES):
                 return clean.title()
 
-    # 2. Pattern: from <Company> or at <Company>
+    # 2. Strong legal entity pattern (e.g. <Name> Private Limited / Pvt Ltd / Limited / Ltd / Enterprises / Industries)
+    legal_m = re.search(
+        r'\b([A-Za-z0-9\s&().]{3,50}?\b(?:Private Limited|Pvt Ltd|Pvt\. Ltd\.|Limited|Ltd|Enterprises|Industries|Electricals|Electric|Traders|Corporation))\b',
+        text,
+        re.IGNORECASE
+    )
+    if legal_m:
+        cand = legal_m.group(1).strip()
+        cand_l = cand.lower()
+        if not any(p in cand_l for p in IGNORE_UI_PHRASES) and not any(p in cand_l for p in CHAT_CHATTER_PHRASES):
+            return cand.title()
+
+    # 3. Pattern: from <Company> or at <Company>
     from_m = re.search(
         r'\b(?:from|at)\s+([A-Za-z0-9\s&]{3,40}?(?:electricals|electric|enterprises|traders|trading|industries|corp|corporation|agency|agencies|hardware|store|solutions|limited|ltd|pvt ltd|llp))\b',
         text,
@@ -150,7 +162,7 @@ def extract_company_name(text: str) -> Optional[str]:
         if not any(p in cand_l for p in IGNORE_UI_PHRASES) and not any(p in cand_l for p in CHAT_CHATTER_PHRASES):
             return cand.title()
 
-    # 3. Line scan with strict indicator
+    # 4. Line scan with strict indicator
     for line in text.splitlines():
         line_clean = line.strip()
         lower = line_clean.lower()
