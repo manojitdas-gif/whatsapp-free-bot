@@ -26,19 +26,17 @@ async def admin_dashboard(request: Request, db: Session = Depends(get_db)):
 
     customers = db.query(Customer).order_by(Customer.last_contact_at.desc()).limit(100).all()
 
-    return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
-            "total_customers": total_customers,
-            "completed_enquiries": completed_enquiries,
-            "waiting_reqs": waiting_reqs,
-            "waiting_details": waiting_details,
-            "customers": customers,
-            "format_phone": format_phone_display,
-            "format_ts": format_ist_timestamp,
-        }
-    )
+    content = templates.env.get_template("index.html").render({
+        "request": request,
+        "total_customers": total_customers,
+        "completed_enquiries": completed_enquiries,
+        "waiting_reqs": waiting_reqs,
+        "waiting_details": waiting_details,
+        "customers": customers,
+        "format_phone": format_phone_display,
+        "format_ts": format_ist_timestamp,
+    })
+    return HTMLResponse(content=content)
 
 @router.get("/api/customer/{customer_id}/messages")
 async def get_customer_messages(customer_id: int, db: Session = Depends(get_db)):
