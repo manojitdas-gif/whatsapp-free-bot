@@ -1,25 +1,22 @@
 """
-excel_logger.py — Clean 10-Column Customer Lead Logger.
+excel_logger.py — Exact 8-Column Customer Lead Logger.
 
-COLUMNS (raw data only — no decorative dashes, no bot messages):
-  1.  S.No.
-  2.  First Contact Date (IST)
-  3.  Last Contact Date (IST)
-  4.  Contact Person Name
-  5.  WhatsApp Number
-  6.  Email ID
-  7.  Company / Business Name
-  8.  GST Number
-  9.  Complete Address
-  10. Requirements Details
+EXACT COLUMNS (matching user's Excel template):
+  Col 1: First Contact Date (IST)
+  Col 2: Last Contact Date (IST)
+  Col 3: Contact Person Name
+  Col 4: WhatsApp Number
+  Col 5: Email ID
+  Col 6: Company / Business Name
+  Col 7: GST Number
+  Col 8: Complete Address
 
 RULES:
+  - Data saved ONLY in these 8 columns — nothing else.
   - A customer row is created once (on first message).
-  - Each subsequent message ONLY fills in NEW data to empty cells.
-  - Empty cell = blank (no dashes, no placeholders).
-  - Requirements are accumulated across messages (appended, not overwritten).
-  - Saves to Desktop: WhatsApp_Conversations.xlsx & WhatsApp_Leads_SHARED.xlsx
-  - Also saves live CSV: WhatsApp_Leads_Live.csv
+  - Each subsequent message fills in ONLY empty cells — never overwrites existing data.
+  - Cells stay truly blank if no data found (no dashes, no placeholders).
+  - Data extracted from: text messages, photos (OCR), PDFs, Word, Excel, screenshots.
 """
 
 import os
@@ -42,45 +39,53 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 from config import EXCEL_FILE_PATH, BACKUP_EXCEL_PATH, SHARED_EXCEL_PATH
-from document_analyzer import parse_product_details
 
 IST = timezone(timedelta(hours=5, minutes=30))
 _excel_lock = Lock()
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 QUEUE_FILE = os.path.join(BASE_DIR, "data", "pending_lead_queue.json")
-CSV_PATH = os.path.join(os.path.expanduser("~"), "Desktop", "WhatsApp_Leads_Live.csv")
+CSV_PATH   = os.path.join(os.path.expanduser("~"), "Desktop", "WhatsApp_Leads_Live.csv")
 
-# Header style: Deep green
-HEADER_FILL = PatternFill("solid", fgColor="1B5E20")
+# ── STYLING ────────────────────────────────────────────────────────────────────
+HEADER_FILL = PatternFill("solid", fgColor="1B5E20")          # Dark green
 HEADER_FONT = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
 DATA_FONT   = Font(name="Calibri", size=10)
+ALT_FILL    = PatternFill("solid", fgColor="F1F8E9")           # Very light green for alternate rows
 
 THIN_BORDER = Border(
-    left  =Side(style="thin", color="CCCCCC"),
-    right =Side(style="thin", color="CCCCCC"),
-    top   =Side(style="thin", color="CCCCCC"),
-    bottom=Side(style="thin", color="CCCCCC"),
+    left  =Side(style="thin", color="C8E6C9"),
+    right =Side(style="thin", color="C8E6C9"),
+    top   =Side(style="thin", color="C8E6C9"),
+    bottom=Side(style="thin", color="C8E6C9"),
 )
 
+# ── EXACT 8 COLUMNS matching the user's Excel file ─────────────────────────────
 HEADERS = [
-    "S.No.",
-    "First Contact (IST)",
-    "Last Contact (IST)",
-    "Contact Name",
+    "First Contact Date (IST)",
+    "Last Contact Date (IST)",
+    "Contact Person Name",
     "WhatsApp Number",
     "Email ID",
     "Company / Business Name",
     "GST Number",
     "Complete Address",
-    "Requirements Details",
 ]
-# Column widths in characters
-WIDTHS = [7, 20, 20, 22, 18, 28, 30, 22, 40, 60]
+COL_WIDTHS = [22, 22, 24, 18, 30, 32, 20, 50]
+
+# Column index constants (1-based)
+C_FIRST_CONTACT = 1
+C_LAST_CONTACT  = 2
+C_NAME          = 3
+C_PHONE         = 4
+C_EMAIL         = 5
+C_COMPANY       = 6
+C_GST           = 7
+C_ADDRESS       = 8
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# HELPER: Phone display format
+# PHONE FORMATTER
 # ──────────────────────────────────────────────────────────────────────────────
 
 def format_phone_display(raw_phone: str) -> str:
@@ -93,109 +98,189 @@ def format_phone_display(raw_phone: str) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# ENTITY EXTRACTION — Email, GST, Address, Company, Contact Name
+# ENTITY EXTRACTOR — extract all 6 data fields from any text with high accuracy
 # ──────────────────────────────────────────────────────────────────────────────
 
-def extract_lead_entities(text: str, profile_name: str = "", is_business_step: bool = False) -> dict:
+# Patterns
+_EMAIL_RE   = re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,7}\b')
+_GST_RE     = re.compile(r'\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d]\b', re.IGNORECASE)
+_PHONE_RE   = re.compile(r'\b(?:\+91[\s\-]?)?[6-9]\d{4}[\s\-]?\d{5}\b')
+_PIN_RE     = re.compile(r'\b[1-9]\d{5}\b')
+_URL_RE     = re.compile(r'https?://\S+|www\.\S+', re.IGNORECASE)
+
+_ADDR_KW = re.compile(
+    r'\b(road|rd\b|street|st\b|lane|ln\b|gali|bazar|bazaar|nagar|colony|block|sector|'
+    r'floor|flat|shop|unit|near|opp|opposite|behind|beside|above|below|next to|'
+    r'dist|district|taluk|tehsil|mandal|'
+    r'kolkata|calcutta|mumbai|bombay|delhi|new delhi|chennai|madras|bangalore|bengaluru|'
+    r'hyderabad|pune|ahmedabad|surat|jaipur|lucknow|kanpur|nagpur|indore|bhopal|'
+    r'howrah|siliguri|durgapur|asansol|rajkot|vadodara|coimbatore|kochi|'
+    r'west bengal|maharashtra|gujarat|uttar pradesh|rajasthan|karnataka|tamil nadu|'
+    r'telangana|andhra|kerala|bihar|jharkhand|odisha|assam|punjab|haryana|'
+    r'p\.?o\.?\b|p\.?s\.?\b|via\b)\b',
+    re.IGNORECASE
+)
+
+_BIZ_KW = re.compile(
+    r'\b(enterprise[s]?|pvt\.?\s*ltd\.?|limited|llp|llc|'
+    r'trader[s]?|trading|manufacturer[s]?|supplier[s]?|distributor[s]?|'
+    r'industries|industry|industrial|packaging|packers|'
+    r'corporation|corp\b|company|co\b|group|associates|agency|agencies|'
+    r'shop|store|mart|house|hub|center|centre|works|workshop|'
+    r'solutions|services|systems|tech|technologies)\b',
+    re.IGNORECASE
+)
+
+_CHATTER_WORDS = {
+    "hi", "hello", "hey", "hii", "helo", "ok", "okay", "k",
+    "yes", "no", "sure", "fine", "good", "done", "noted",
+    "thanks", "thank you", "thank you sir", "thanks sir",
+    "please", "kindly", "send", "reply", "call me", "contact",
+    "start", "restart", "haan", "ha", "ji", "namaste",
+    "good morning", "good afternoon", "good evening", "good night",
+}
+
+
+def _is_chatter(text: str) -> bool:
+    return text.strip().lower() in _CHATTER_WORDS
+
+
+def extract_entities(text: str, profile_name: str = "") -> dict:
     """
-    Extract structured entities from customer message text.
-    Returns only fields that are actually found — no placeholder values.
+    Extract all 6 entity fields from customer message text:
+    name, email, company, gst, address, phone (for validation only).
+    Returns dict with keys: contact_name, email, company, gst, address.
+    All values are strings — empty string if not found.
     """
     text = str(text or "").strip()
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
 
-    # Email
-    email_m = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,7}\b', text)
+    # ── EMAIL ──────────────────────────────────────────────────────────────────
+    email_m = _EMAIL_RE.search(text)
     email = email_m.group(0).lower() if email_m else ""
 
-    # GST Number (Indian format: 15 chars)
-    gst_m = re.search(r'\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[A-Z\d]{1}Z[A-Z\d]{1}\b', text, re.IGNORECASE)
+    # ── GST NUMBER ─────────────────────────────────────────────────────────────
+    gst_m = _GST_RE.search(text)
     gst = gst_m.group(0).upper() if gst_m else ""
 
-    # Contact Person Name — explicit keyword patterns first
+    # ── CONTACT PERSON NAME ────────────────────────────────────────────────────
     contact_name = ""
-    name_m = re.search(
-        r'(?:contact\s*person|contact|person|name)\s*[:\-–]?\s*([A-Za-z](?:[A-Za-z\s]{1,28}[A-Za-z]))',
+
+    # Pattern 1: explicit label
+    name_label_m = re.search(
+        r'(?:contact\s*(?:person|name)|person\s*name|name)\s*[:\-–=]\s*([A-Za-z][A-Za-z\s\.]{2,35})',
         text, re.IGNORECASE
     )
-    if name_m:
-        candidate = name_m.group(1).strip()
-        # Reject if it looks like a business phrase
-        if not re.search(r'\b(company|enterprise|pvt|ltd|gst|road|street|require|need|want)\b', candidate, re.IGNORECASE):
+    if name_label_m:
+        candidate = name_label_m.group(1).strip().rstrip('.,;')
+        if not _BIZ_KW.search(candidate) and len(candidate.split()) <= 5:
             contact_name = candidate.title()
-    if not contact_name and profile_name and profile_name.lower() not in ("customer", "unknown"):
-        contact_name = profile_name.strip().title()
 
-    # Company / Business Name
+    # Pattern 2: "My name is ..."
+    if not contact_name:
+        name_is_m = re.search(r'my\s+name\s+is\s+([A-Za-z][A-Za-z\s\.]{2,30})', text, re.IGNORECASE)
+        if name_is_m:
+            contact_name = name_is_m.group(1).strip().rstrip('.,;').title()
+
+    # Pattern 3: WhatsApp profile name (fallback)
+    if not contact_name and profile_name:
+        pn = profile_name.strip()
+        if pn.lower() not in ("customer", "unknown", "business account") and len(pn) >= 2:
+            contact_name = pn.title()
+
+    # ── COMPANY / BUSINESS NAME ────────────────────────────────────────────────
     company = ""
-    comp_m = re.search(
-        r'(?:company|business|firm|shop|org|enterprise)\s*(?:name)?\s*[:\-–]?\s*([^\n,]{3,50})',
+
+    # Pattern 1: explicit label
+    comp_label_m = re.search(
+        r'(?:company|business|firm|shop|organisation|organization|org)\s*(?:name)?\s*[:\-–=]\s*([^\n,;]{3,60})',
         text, re.IGNORECASE
     )
-    if comp_m:
-        company = comp_m.group(1).strip()
-    else:
-        # Heuristic: line that contains a business-type keyword
-        biz_rx = re.compile(
-            r'\b(enterprise[s]?|traders?|trading|pvt\.?\s*ltd|ltd|industries|packaging|'
-            r'corporation|solutions|works|manufacturing|group|agency|agencies)\b',
-            re.IGNORECASE
-        )
-        for line in text.splitlines():
-            line = line.strip()
-            if biz_rx.search(line) and not re.search(r'\b(need|want|send|quote|price|rate|req)\b', line, re.IGNORECASE):
-                if 3 <= len(line) <= 60:
-                    company = line
-                    break
+    if comp_label_m:
+        company = comp_label_m.group(1).strip().rstrip('.,;')
 
-    # Address — collect lines that look like address fragments
-    addr_lines = []
-    ADDR_KW = re.compile(
-        r'\b(road|rd|street|st\b|lane|gali|bazar|bazaar|nagar|colony|block|sector|'
-        r'floor|plot|near|opp|opposite|behind|dist|district|pin|'
-        r'kolkata|mumbai|delhi|chennai|bangalore|hyderabad|pune|ahmedabad|'
-        r'surat|jaipur|lucknow|howrah|bengal|maharashtra|gujarat|pradesh)\b',
-        re.IGNORECASE
-    )
-    for line in text.splitlines():
-        line = line.strip()
+    # Pattern 2: line containing business keywords
+    if not company:
+        for line in lines:
+            if _BIZ_KW.search(line):
+                # Reject if it's an address line or chatter
+                if not _ADDR_KW.search(line) and not _is_chatter(line):
+                    if not gst or gst.lower() not in line.lower():
+                        if 3 <= len(line) <= 70:
+                            company = line.strip().rstrip('.,;')
+                            break
+
+    # ── COMPLETE ADDRESS ───────────────────────────────────────────────────────
+    address_lines = []
+    for line in lines:
         if not line:
             continue
+        # Skip if it's the GST line or email line
         if gst and gst.lower() in line.lower():
             continue
         if email and email in line.lower():
             continue
-        if company and line.lower() == company.lower():
+        if _URL_RE.search(line):
             continue
-        if ADDR_KW.search(line) or re.search(r'\b\d{6}\b', line):
-            cleaned = re.sub(r'^(?:address|location|addr|office)\s*[:\-–]?\s*', '', line, flags=re.IGNORECASE).strip()
-            if cleaned and cleaned not in addr_lines:
-                addr_lines.append(cleaned)
-    address = ", ".join(addr_lines)
+        if _is_chatter(line):
+            continue
+        # Skip if it's the company line
+        if company and line.lower().strip() == company.lower().strip():
+            continue
+        # Skip if it's the contact name line alone
+        if contact_name and line.lower().strip() == contact_name.lower().strip():
+            continue
+        # Skip phone-only lines
+        if _PHONE_RE.match(line) and len(line) < 16:
+            continue
 
-    # For business step: if company still empty, try first substantive non-chatter line
-    if is_business_step and not company:
-        CHATTER = {"ok","okay","thanks","thank you","hi","hello","hey","yes","no",
-                   "fine","good","sure","k","alright","done","noted"}
-        for line in text.splitlines():
-            line_clean = line.strip()
-            if not line_clean or line_clean.lower() in CHATTER:
+        # Accept if it has address keywords OR a pin code
+        if _ADDR_KW.search(line) or _PIN_RE.search(line):
+            cleaned = re.sub(
+                r'^(?:address|location|office\s*address|addr|add)\s*[:\-–=]\s*',
+                '', line, flags=re.IGNORECASE
+            ).strip()
+            if cleaned and cleaned not in address_lines:
+                address_lines.append(cleaned)
+
+    # If no keyword match but text is clearly multi-line address-like (has pin code)
+    if not address_lines and _PIN_RE.search(text):
+        # Grab up to 3 lines around the pin code line
+        for i, line in enumerate(lines):
+            if _PIN_RE.search(line):
+                start = max(0, i - 2)
+                end = min(len(lines), i + 2)
+                address_lines = [l for l in lines[start:end] if not _is_chatter(l)]
+                break
+
+    address = ", ".join(address_lines) if address_lines else ""
+
+    # ── FALLBACK: for business step, if company still not found, try first
+    #    non-chatter, non-address, non-gst, non-email, non-name line ────────────
+    if not company:
+        for line in lines:
+            if _is_chatter(line):
                 continue
-            if gst_m and gst in line_clean:
+            if gst and gst.lower() in line.lower():
                 continue
-            if email and email in line_clean.lower():
+            if email and email in line.lower():
                 continue
-            if re.search(r'\b(pin|road|street|gst|www|http|call|reply|send)\b', line_clean, re.IGNORECASE):
+            if _ADDR_KW.search(line) or _PIN_RE.search(line):
                 continue
-            if 3 <= len(line_clean) <= 60:
-                company = line_clean
+            if _PHONE_RE.match(line) and len(line) < 16:
+                continue
+            if contact_name and line.lower().strip() == contact_name.lower().strip():
+                continue
+            if 3 <= len(line) <= 70 and not re.search(r'\b(need|want|require|send|quote|price|rate|product|item)\b', line, re.IGNORECASE):
+                company = line.strip().rstrip('.,;')
                 break
 
     return {
-        "email":   email,
-        "company": company,
-        "gst":     gst,
-        "address": address,
-        "contact": contact_name,
+        "contact_name": contact_name,
+        "email":        email,
+        "company":      company,
+        "gst":          gst,
+        "address":      address,
     }
 
 
@@ -215,8 +300,9 @@ def _get_or_create_workbook(file_path: str) -> openpyxl.Workbook:
     ws = wb.active
     ws.title = "Customer Leads"
     ws.freeze_panes = "A2"
+    ws.sheet_view.showGridLines = True
 
-    for col_idx, (header, width) in enumerate(zip(HEADERS, WIDTHS), start=1):
+    for col_idx, (header, width) in enumerate(zip(HEADERS, COL_WIDTHS), start=1):
         cell = ws.cell(row=1, column=col_idx, value=header)
         cell.font = HEADER_FONT
         cell.fill = HEADER_FILL
@@ -224,90 +310,82 @@ def _get_or_create_workbook(file_path: str) -> openpyxl.Workbook:
         cell.border = THIN_BORDER
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
-    ws.row_dimensions[1].height = 30
+    ws.row_dimensions[1].height = 32
     return wb
 
 
 def _apply_lead_to_workbook(file_path: str, lead: dict) -> bool:
-    """Write or update a customer lead row. Only fills columns that have new data."""
+    """Write or update a customer lead row — 8 columns only."""
     wb = _get_or_create_workbook(file_path)
     ws = wb["Customer Leads"] if "Customer Leads" in wb.sheetnames else wb.active
 
-    phone        = lead.get("phone", "")
-    timestamp    = lead.get("timestamp", "")
-    contact_name = lead.get("contact_name", "")
-    email        = lead.get("email", "")
-    company      = lead.get("company", "")
-    gst          = lead.get("gst", "")
-    address      = lead.get("address", "")
-    requirements = lead.get("requirements", "")
+    phone    = lead.get("phone", "")
+    ts       = lead.get("timestamp", "")
+    name     = lead.get("contact_name", "")
+    email    = lead.get("email", "")
+    company  = lead.get("company", "")
+    gst      = lead.get("gst", "")
+    address  = lead.get("address", "")
 
     align_c = Alignment(horizontal="center", vertical="center")
-    align_l = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    align_l = Alignment(horizontal="left",   vertical="center", wrap_text=True)
 
-    # Find existing row for this phone number
-    match_row = None
+    # Find existing row by WhatsApp Number (column 4)
+    match_row  = None
     first_empty = None
-    lead_count = 0
+    row_count  = 0
 
     for r in range(2, ws.max_row + 2):
-        cell_val = ws.cell(row=r, column=5).value
-        if cell_val:
-            lead_count += 1
-            if str(cell_val).strip() == str(phone).strip():
+        cv = ws.cell(row=r, column=C_PHONE).value
+        if cv:
+            row_count += 1
+            if str(cv).strip() == str(phone).strip():
                 match_row = r
                 break
         elif first_empty is None:
             first_empty = r
 
+    def _fill_if_empty(row, col, new_val):
+        """Only write if cell is currently blank and we have a value."""
+        if new_val:
+            existing = ws.cell(row=row, column=col).value
+            if not existing or str(existing).strip() == "":
+                ws.cell(row=row, column=col, value=new_val)
+
     if match_row:
-        # Update existing row: only overwrite blank cells
-        ws.cell(row=match_row, column=3, value=timestamp)  # always update last contact
-
-        def _fill(col, new_val):
-            if new_val:
-                existing = ws.cell(row=match_row, column=col).value
-                if not existing or str(existing).strip() in ("", "—", "-"):
-                    ws.cell(row=match_row, column=col, value=new_val)
-
-        _fill(4, contact_name)
-        _fill(6, email)
-        _fill(7, company)
-        _fill(8, gst)
-        _fill(9, address)
-
-        # Requirements: accumulate (append new content)
-        if requirements:
-            existing_req = str(ws.cell(row=match_row, column=10).value or "").strip()
-            if not existing_req or existing_req in ("—", "-"):
-                ws.cell(row=match_row, column=10, value=requirements)
-            else:
-                # Only append if genuinely new information
-                if requirements.lower().strip() not in existing_req.lower():
-                    ws.cell(row=match_row, column=10, value=existing_req + "\n" + requirements)
+        # Always update Last Contact Date
+        ws.cell(row=match_row, column=C_LAST_CONTACT, value=ts)
+        # Fill other columns only if currently empty
+        _fill_if_empty(match_row, C_NAME,    name)
+        _fill_if_empty(match_row, C_EMAIL,   email)
+        _fill_if_empty(match_row, C_COMPANY, company)
+        _fill_if_empty(match_row, C_GST,     gst)
+        _fill_if_empty(match_row, C_ADDRESS, address)
 
     else:
-        # New customer row
         new_row = first_empty if first_empty else (ws.max_row + 1)
-        row_values = [
-            lead_count + 1,   # S.No.
-            timestamp,        # First Contact
-            timestamp,        # Last Contact
-            contact_name,     # Contact Name (blank if unknown)
-            phone,            # WhatsApp Number
-            email,            # Email
-            company,          # Company
-            gst,              # GST
-            address,          # Address
-            requirements,     # Requirements
+        row_vals = [
+            ts,      # C1: First Contact Date
+            ts,      # C2: Last Contact Date
+            name,    # C3: Contact Person Name
+            phone,   # C4: WhatsApp Number
+            email,   # C5: Email ID
+            company, # C6: Company / Business Name
+            gst,     # C7: GST Number
+            address, # C8: Complete Address
         ]
-        for col_idx, val in enumerate(row_values, start=1):
+        is_alt = (new_row % 2 == 0)
+        for col_idx, val in enumerate(row_vals, start=1):
             cell = ws.cell(row=new_row, column=col_idx, value=val if val else None)
             cell.font = DATA_FONT
             cell.border = THIN_BORDER
-            cell.alignment = align_c if col_idx in (1, 2, 3, 5) else align_l
-
-        ws.row_dimensions[new_row].height = 25
+            if is_alt:
+                cell.fill = ALT_FILL
+            cell.alignment = (
+                align_c if col_idx in (C_FIRST_CONTACT, C_LAST_CONTACT, C_PHONE, C_GST)
+                else align_l
+            )
+        ws.row_dimensions[new_row].height = 28
 
     wb.save(file_path)
     return True
@@ -337,7 +415,6 @@ def _save_queue(queue: list) -> None:
 
 
 def flush_pending_excel_queue():
-    """Try to write any previously queued leads (when file was locked)."""
     with _excel_lock:
         queue = _load_queue()
         if not queue:
@@ -374,32 +451,25 @@ def _update_live_csv(lead: dict) -> None:
         phone = lead.get("phone", "")
         match_idx = None
         for i in range(1, len(rows)):
-            if len(rows[i]) > 4 and rows[i][4] == phone:
+            if len(rows[i]) > 3 and rows[i][3] == phone:
                 match_idx = i
                 break
 
-        def _safe(rows, idx, col, val):
+        def _safe_fill(rows, idx, col, val):
             while len(rows[idx]) <= col:
                 rows[idx].append("")
             if val and not rows[idx][col]:
                 rows[idx][col] = val
 
         if match_idx is not None:
-            rows[match_idx][2] = lead.get("timestamp", "")  # Last contact
-            _safe(rows, match_idx, 3, lead.get("contact_name"))
-            _safe(rows, match_idx, 5, lead.get("email"))
-            _safe(rows, match_idx, 6, lead.get("company"))
-            _safe(rows, match_idx, 7, lead.get("gst"))
-            _safe(rows, match_idx, 8, lead.get("address"))
-            if lead.get("requirements"):
-                prev = rows[match_idx][9] if len(rows[match_idx]) > 9 else ""
-                if not prev:
-                    rows[match_idx][9] = lead["requirements"]
-                elif lead["requirements"].lower() not in prev.lower():
-                    rows[match_idx][9] = prev + " | " + lead["requirements"]
+            rows[match_idx][1] = lead.get("timestamp", "")  # Last contact
+            _safe_fill(rows, match_idx, 2, lead.get("contact_name"))
+            _safe_fill(rows, match_idx, 4, lead.get("email"))
+            _safe_fill(rows, match_idx, 5, lead.get("company"))
+            _safe_fill(rows, match_idx, 6, lead.get("gst"))
+            _safe_fill(rows, match_idx, 7, lead.get("address"))
         else:
             rows.append([
-                len(rows),
                 lead.get("timestamp", ""),
                 lead.get("timestamp", ""),
                 lead.get("contact_name") or "",
@@ -408,7 +478,6 @@ def _update_live_csv(lead: dict) -> None:
                 lead.get("company") or "",
                 lead.get("gst") or "",
                 lead.get("address") or "",
-                lead.get("requirements") or "",
             ])
 
         with open(CSV_PATH, "w", encoding="utf-8-sig", newline="") as f:
@@ -425,50 +494,49 @@ def log_customer_lead(
     sender_phone: str,
     sender_name: str,
     message_text: str = "",
-    analyzed_products: str = "",
-    is_requirement_step: bool = False,
-    is_business_step: bool = False,
+    ocr_text: str = "",
 ) -> None:
     """
     Log customer lead to all Excel/CSV files.
-    Called once per real incoming customer message (not on every loop tick).
+    Extracts exactly the 8 column fields from message_text and ocr_text.
+    Called once per real incoming customer message.
+
+    Args:
+        sender_phone: raw phone number string
+        sender_name:  WhatsApp profile display name
+        message_text: all customer text messages combined
+        ocr_text:     text extracted from customer's images/documents/files
     """
     now_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
     formatted_phone = format_phone_display(sender_phone)
 
-    extracted = extract_lead_entities(message_text, sender_name, is_business_step=is_business_step)
+    # Combine all available text for maximum entity extraction accuracy
+    combined_text = "\n".join(filter(None, [message_text.strip(), ocr_text.strip()]))
 
-    # Requirements: use OCR result first, then parse from text
-    requirements = ""
-    if analyzed_products and "No text" not in analyzed_products:
-        requirements = analyzed_products
-    elif message_text and not message_text.startswith("["):
-        requirements = parse_product_details(message_text)
-
-    # For business step: requirements not relevant (it's about biz details), don't overwrite
-    if is_business_step:
-        requirements = ""
+    extracted = extract_entities(combined_text, profile_name=sender_name)
 
     lead = {
         "timestamp":    now_ist,
-        "contact_name": extracted["contact"],
+        "contact_name": extracted["contact_name"],
         "phone":        formatted_phone,
         "email":        extracted["email"],
         "company":      extracted["company"],
         "gst":          extracted["gst"],
         "address":      extracted["address"],
-        "requirements": requirements,
     }
+
+    print(f"[LEAD] {formatted_phone} | Name: '{extracted['contact_name']}' | "
+          f"Company: '{extracted['company']}' | GST: '{extracted['gst']}' | "
+          f"Email: '{extracted['email']}' | Address: '{extracted['address'][:40]}'", flush=True)
 
     # Cloud sync
     try:
         from cloud_sync import push_lead_to_cloud
         push_lead_to_cloud({
             "first_contact": now_ist, "last_contact": now_ist,
-            "name": extracted["contact"], "phone": formatted_phone,
+            "name": extracted["contact_name"], "phone": formatted_phone,
             "email": extracted["email"], "company": extracted["company"],
             "gst": extracted["gst"], "address": extracted["address"],
-            "requirements": requirements,
         })
     except Exception:
         pass
@@ -476,22 +544,20 @@ def log_customer_lead(
     with _excel_lock:
         _update_live_csv(lead)
 
-        # Backup copy
         try:
             _apply_lead_to_workbook(BACKUP_EXCEL_PATH, lead)
         except Exception as e:
             print(f"[EXCEL BACKUP ERROR] {e}")
 
-        # Desktop copies
         for dest in [EXCEL_FILE_PATH, SHARED_EXCEL_PATH]:
             try:
                 _apply_lead_to_workbook(dest, lead)
-                print(f"[EXCEL] ✅ {os.path.basename(dest)}: {extracted['contact'] or sender_name} ({formatted_phone})")
+                print(f"[EXCEL] ✅ {os.path.basename(dest)}: {extracted['contact_name'] or sender_name} ({formatted_phone})")
             except PermissionError:
                 queue = _load_queue()
                 queue.append((dest, lead))
                 _save_queue(queue)
-                print(f"[EXCEL] ⚠ {os.path.basename(dest)} is open — queued for next sync.")
+                print(f"[EXCEL] ⚠ {os.path.basename(dest)} is open — queued.")
             except Exception as e:
                 queue = _load_queue()
                 queue.append((dest, lead))
