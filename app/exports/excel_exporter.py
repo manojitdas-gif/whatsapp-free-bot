@@ -80,7 +80,8 @@ def sync_customer_to_excel(customer) -> None:
             try:
                 _write_to_workbook(file_path, customer)
             except PermissionError:
-                pass  # Opened in Excel by user, will sync to shared/csv
+                if file_path == settings.EXCEL_EXPORT_PATH:
+                    queue_pending_customer(customer)
             except Exception as e:
                 print(f"[EXCEL SYNC ERROR] {e}")
 
@@ -108,6 +109,10 @@ def _get_or_create_workbook(file_path: str) -> openpyxl.Workbook:
 
     ws.freeze_panes = "A2"
     ws.sheet_view.showGridLines = True
+
+    # Trim extra columns if any exist beyond 9
+    if ws.max_column > len(HEADERS):
+        ws.delete_cols(len(HEADERS) + 1, ws.max_column - len(HEADERS))
 
     for col_idx, (header, width) in enumerate(zip(HEADERS, COL_WIDTHS), start=1):
         cell = ws.cell(row=1, column=col_idx)
@@ -224,3 +229,24 @@ def _write_to_csv(file_path: str, customer) -> None:
 
     with open(file_path, "w", encoding="utf-8-sig", newline="") as f:
         csv.writer(f).writerows(rows)
+
+_pending_lead_queue = []
+
+def queue_pending_customer(customer):
+    global _pending_lead_queue
+    _pending_lead_queue.append(customer)
+
+def flush_pending_excel_queue():
+    global _pending_lead_queue
+    if not _pending_lead_queue:
+        return
+    remaining = []
+    with _excel_lock:
+        for c in _pending_lead_queue:
+            try:
+                _write_to_workbook(settings.EXCEL_EXPORT_PATH, c)
+            except PermissionError:
+                remaining.append(c)
+            except Exception:
+                pass
+    _pending_lead_queue = remaining
