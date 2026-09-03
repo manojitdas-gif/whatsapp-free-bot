@@ -33,7 +33,7 @@ from app.ai.extractor import analyze_conversation
 from app.conversation.decision_engine import evaluate_conversation_completeness
 from app.conversation.templates import RESPONSE_1, RESPONSE_2, RESPONSE_3, get_response_template
 from app.conversation.state_machine import ConversationStage, ConversationStatus
-from app.exports.excel_exporter import sync_customer_to_excel
+from app.exports.excel_exporter import sync_customer_to_excel, flush_pending_excel_queue
 from app.database.session import SessionLocal, init_db
 from app.database.models import Customer, Conversation, Message, ResponseLog, utc_now
 from app.documents.ocr_engine import run_image_ocr
@@ -463,6 +463,9 @@ async def main():
                 # ── Also process whatever chat is currently open in main ───────
                 if await page.query_selector('div#main header'):
                     await process_active_chat(page)
+
+                # ── Flush pending Excel writes if previously locked by user ───
+                flush_pending_excel_queue()
 
                 await asyncio.sleep(1.0)
 
