@@ -44,10 +44,12 @@ def analyze_conversation(
         for msg in combined_texts:
             clean = msg.strip()
             lower = clean.lower()
-            # Skip introductions, address lines, and business details
-            if any(k in lower for k in ("gst", "email", "address", "company", "my name is", "i am", "street", "road", "lane", "pin", "kolkata", "bengal")):
+            if "?" in clean:
                 continue
-            if any(w in lower for w in ("need", "want", "require", "send", "rate", "price", "quote", "order", "item")):
+            # Skip introductions, address lines, business details, bot prompts, questions
+            if any(k in lower for k in ("gst", "email", "address", "company", "my name is", "i am", "street", "road", "lane", "pin", "kolkata", "bengal", "thank you", "please share", "quotation", "regret", "costly", "delivery is", "chaheye", "kardo")):
+                continue
+            if any(w in lower for w in ("need", "want", "require", "send", "rate", "price", "order", "item", "bulb", "fan", "wire", "cable", "switch", "mcb", "watt", "pcs", "nos")):
                 raw_req = clean
                 break
 
