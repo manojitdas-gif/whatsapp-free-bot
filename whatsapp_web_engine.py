@@ -140,16 +140,23 @@ async def send_reply(page, text: str) -> bool:
         input_box = None
         for _ in range(15):
             input_box = (
-                await page.query_selector('footer div[contenteditable="true"]')
-                or await page.query_selector('div[data-tab="10"][contenteditable="true"]')
+                await page.query_selector('footer [contenteditable="true"]')
+                or await page.query_selector('div#main footer [contenteditable="true"]')
+                or await page.query_selector('[contenteditable="true"][data-tab="10"]')
+                or await page.query_selector('footer [role="textbox"]')
+                or await page.query_selector('[contenteditable="true"][role="textbox"]')
                 or await page.query_selector('div[title="Type a message"]')
-                or await page.query_selector('div[role="textbox"][contenteditable="true"]')
-                or await page.query_selector('div#main footer div[contenteditable="true"]')
-                or await page.query_selector('p.selectable-text')
             )
             if input_box:
                 break
             await asyncio.sleep(0.5)
+
+        if not input_box:
+            all_editables = await page.query_selector_all('[contenteditable="true"]')
+            if len(all_editables) >= 2:
+                input_box = all_editables[-1]
+            elif all_editables:
+                input_box = all_editables[0]
 
         if not input_box:
             print("[SEND ERROR] Message input box not found in active chat.", flush=True)
