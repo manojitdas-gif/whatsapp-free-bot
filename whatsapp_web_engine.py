@@ -336,29 +336,35 @@ async def main():
         while True:
             try:
                 # 1. Dismiss banners/popups
-                close_btn = await page.query_selector('span[data-icon="x-alt"], span[data-icon="x"], button[aria-label="Close"]')
-                if close_btn:
-                    try:
-                        await close_btn.click()
-                        await asyncio.sleep(0.3)
-                    except Exception:
-                        pass
+                for _ in range(2):
+                    close_btn = await page.query_selector('span[data-icon="x-alt"], span[data-icon="x"], button[aria-label="Close"]')
+                    if close_btn:
+                        try:
+                            await close_btn.click()
+                            await asyncio.sleep(0.3)
+                        except Exception:
+                            pass
 
-                # 2. Check for any unread chat badges in pane-side
-                unread_handle = await page.evaluate_handle('''() => {
-                    const badge = document.querySelector('div#pane-side span[aria-label*="unread"], div#pane-side span[aria-label*="Unread"]');
-                    if (badge) {
-                        return badge.closest('div[role="listitem"]') || badge.closest('div[tabindex]') || badge.parentElement.parentElement;
-                    }
-                    return null;
+                # 2. Check all unread chats in left sidebar (pane-side)
+                unread_chats = await page.evaluate('''() => {
+                    const spans = Array.from(document.querySelectorAll('div#pane-side span[title]'));
+                    return spans.map(s => {
+                        const title = s.getAttribute('title');
+                        const row = s.closest('div[role="listitem"]') || s.closest('div[tabindex]') || s.parentElement.parentElement;
+                        const unreadBadge = row ? (row.querySelector('span[aria-label*="unread"]') || row.querySelector('span[aria-label*="Unread"]')) : null;
+                        const unread = unreadBadge ? unreadBadge.getAttribute('aria-label') : '';
+                        return { title, unread };
+                    }).filter(c => c.unread !== '');
                 }''')
-                unread_el = unread_handle.as_element()
-                if unread_el:
-                    print("[UNREAD] Opening unread chat badge...", flush=True)
-                    await unread_el.click(force=True)
-                    await asyncio.sleep(1.5)
 
-                # 3. Process active chat in right pane (div#main)
+                for uchat in unread_chats:
+                    title = uchat['title']
+                    print(f"\n[UNREAD SCAN] Found unread chat: '{title}' ({uchat['unread']})", flush=True)
+                    span_el = await page.query_selector(f'div#pane-side span[title="{title}"]')
+                    if span_el:
+                        await process_chat(page, span_el)
+
+                # 3. Also check the currently active open chat in div#main
                 active_header = await page.query_selector('header span[title], header div[role="button"] span')
                 if active_header:
                     contact_title = (await active_header.inner_text()).strip()
@@ -373,65 +379,61 @@ async def main():
                     if not phone:
                         phone = "91" + re.sub(r'[^0-9]', '', str(abs(hash(contact_title))))[:10]
 
-                    # Check latest message in active chat
-                    last_msg_row = await page.query_selector('div#main div[role="row"]:last-child')
-                    if last_msg_row:
-                        is_in = await last_msg_row.evaluate('el => el.classList.contains("message-in") || el.querySelector(".message-in") !== null || (el.getAttribute("data-id") && el.getAttribute("data-id").includes("false_"))')
-                        if is_in:
-                            text_el = await last_msg_row.query_selector('span.selectable-text, .copyable-text')
-                            msg_text = (await text_el.inner_text()).strip() if text_el else ""
+                    # Extract all messages in active chat
+                    messages_data = await page.evaluate('''() => {
+                        const rows = Array.from(document.querySelectorAll('div#main div[role="row"], div#main div.copyable-text'));
+                        return rows.map(r => {
+                            const textEl = r.querySelector('span.selectable-text') || r.querySelector('.copyable-text');
+                            const text = textEl ? textEl.innerText.trim() : '';
+                            const isOut = r.closest('div[data-id*="true_"]') !== null || r.classList.contains('message-out');
+                            return { text, isOut };
+                        }).filter(m => m.text.length > 0);
+                    }''')
 
-                            # Check for image or doc
-                            analyzed_products = ""
-                            img_el = await last_msg_row.query_selector('img[src*="blob:"]')
-                            if img_el:
-                                img_time = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
-                                saved_img_path = os.path.join(FILES_DIR, f"{phone}_{img_time}.png")
-                                try:
-                                    await img_el.screenshot(path=saved_img_path)
-                                    summary, _ = analyze_file(saved_img_path, ".png")
-                                    analyzed_products = summary
-                                    if not msg_text:
-                                        msg_text = f"[PHOTO: {os.path.basename(saved_img_path)}]"
-                                except Exception as e:
-                                    pass
+                    if messages_data and not messages_data[-1]['isOut']:
+                        latest_text = messages_data[-1]['text']
 
-                            doc_el = await last_msg_row.query_selector('span[title*="."], div[title*="."]')
-                            if doc_el:
-                                doc_title = await doc_el.get_attribute("title") or "document.pdf"
-                                if not msg_text or msg_text == "Hi":
-                                    msg_text = f"[DOCUMENT: {doc_title}]"
+                        # Check state transition
+                        current_step, can_advance = register_customer_incoming_message(phone, latest_text)
 
-                            if not msg_text:
-                                msg_text = "Hi"
+                        # Check image / doc
+                        analyzed_products = ""
+                        img_el = await page.query_selector('div#main img[src*="blob:"]')
+                        if img_el:
+                            img_time = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
+                            saved_img_path = os.path.join(FILES_DIR, f"{phone}_{img_time}.png")
+                            try:
+                                await img_el.screenshot(path=saved_img_path)
+                                summary, _ = analyze_file(saved_img_path, ".png")
+                                analyzed_products = summary
+                            except Exception:
+                                pass
 
-                            current_step, can_advance = register_customer_incoming_message(phone, msg_text)
+                        is_req = (current_step in (0, 1))
+                        is_biz = (current_step == 2)
+                        if is_req and not analyzed_products:
+                            analyzed_products = parse_product_details(latest_text)
 
-                            is_req = (current_step in (0, 1))
-                            is_biz = (current_step == 2)
-                            if is_req and not analyzed_products:
-                                analyzed_products = parse_product_details(msg_text)
+                        log_customer_lead(
+                            sender_phone=phone,
+                            sender_name=name,
+                            message_text=latest_text,
+                            analyzed_products=analyzed_products,
+                            is_requirement_step=is_req,
+                            is_business_step=is_biz,
+                        )
 
-                            log_customer_lead(
-                                sender_phone=phone,
-                                sender_name=name,
-                                message_text=msg_text,
-                                analyzed_products=analyzed_products,
-                                is_requirement_step=is_req,
-                                is_business_step=is_biz,
-                            )
-
-                            if can_advance and current_step in (0, 1, 2):
-                                target_step = current_step + 1
-                                delay = STEP_DELAYS.get(target_step, 1.0)
-                                reply_text = get_step_message(target_step)
-                                print(f"\n[{datetime.now(IST).strftime('%H:%M:%S')}] 📩 Incoming from {name} ({phone}): '{msg_text[:40]}'", flush=True)
-                                print(f"         ⏳ Pausing {delay}s before Step {target_step} reply...", flush=True)
-                                await asyncio.sleep(delay)
-                                success = await send_reply(page, reply_text)
-                                if success:
-                                    mark_bot_reply_sent(phone, target_step)
-                                    print(f"         ✅ Step {target_step} delivered successfully to {phone}!", flush=True)
+                        if can_advance and current_step in (0, 1, 2):
+                            target_step = current_step + 1
+                            delay = STEP_DELAYS.get(target_step, 1.0)
+                            reply_text = get_step_message(target_step)
+                            print(f"\n[{datetime.now(IST).strftime('%H:%M:%S')}] 📩 Active chat incoming from {name} ({phone}): '{latest_text[:40]}'", flush=True)
+                            print(f"         ⏳ Pausing {delay}s before Step {target_step} reply...", flush=True)
+                            await asyncio.sleep(delay)
+                            success = await send_reply(page, reply_text)
+                            if success:
+                                mark_bot_reply_sent(phone, target_step)
+                                print(f"         ✅ Step {target_step} delivered successfully to {phone}!", flush=True)
 
                 flush_pending_excel_queue()
                 await asyncio.sleep(1.0)
