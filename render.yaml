@@ -1,12 +1,26 @@
 services:
   - type: web
-    name: whatsapp-free-engine
-    env: docker
-    plan: free
-    region: singapore
-    autoDeploy: false
+    name: whatsapp-requirement-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: HEADLESS
-        value: "true"
-      - key: GOOGLE_SHEETS_WEBHOOK
-        value: "none"
+      - key: PORT
+        value: 8080
+      - key: ENVIRONMENT
+        value: production
+      - key: WHATSAPP_PROVIDER
+        value: meta_cloud
+      - key: TIMEZONE
+        value: Asia/Kolkata
+      - key: DEBOUNCE_SECONDS
+        value: 1.5
+      - key: DATABASE_URL
+        fromDatabase:
+          name: whatsapp-postgres
+          property: connectionString
+
+databases:
+  - name: whatsapp-postgres
+    databaseName: whatsapp_db
+    user: whatsapp_user
