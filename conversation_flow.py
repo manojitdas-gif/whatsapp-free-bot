@@ -311,6 +311,7 @@ def register_customer_incoming_message(sender_phone: str, message_text: str = ""
             "step": 0,
             "waiting_for_customer": False,
             "last_customer_msg_time": 0,
+            "last_replied_text": "",
             "updated_at": now,
         })
 
@@ -321,7 +322,8 @@ def register_customer_incoming_message(sender_phone: str, message_text: str = ""
             if is_greeting or (now - state.get("updated_at", now)) > 10800:
                 print(f"[FLOW] Customer {sender_phone} restarted flow.")
                 state = {"step": 0, "waiting_for_customer": False,
-                         "last_customer_msg_time": now, "updated_at": now}
+                         "last_customer_msg_time": now, "last_replied_text": "",
+                         "updated_at": now}
                 states[sender_phone] = state
                 _save_states(states)
                 return (0, True)
@@ -330,6 +332,16 @@ def register_customer_incoming_message(sender_phone: str, message_text: str = ""
             states[sender_phone] = state
             _save_states(states)
             return (step, False)
+
+        # ── CORE GUARD: bot already replied and is waiting for customer's NEXT message ──
+        # If the current message is the SAME text we already replied to → customer hasn't
+        # sent anything new yet → block the reply engine from firing again.
+        last_replied_text = state.get("last_replied_text", "")
+        if state.get("waiting_for_customer", False) and last_replied_text:
+            current_msg = (message_text or "").strip()
+            if current_msg == last_replied_text:
+                # Same message that already got a bot reply — do NOT advance
+                return (step, False)
 
         # Update last message time (for stop-typing detection)
         state["last_customer_msg_time"] = now
@@ -341,10 +353,12 @@ def register_customer_incoming_message(sender_phone: str, message_text: str = ""
         return (step, True)
 
 
-def mark_bot_reply_sent(sender_phone: str, step_sent: int) -> None:
+def mark_bot_reply_sent(sender_phone: str, step_sent: int, triggered_by_text: str = "") -> None:
     """
     Called after bot successfully sends a step reply.
-    Advances step and sets waiting_for_customer=True.
+    Advances step, sets waiting_for_customer=True, and records the customer
+    message text that triggered this reply — so on the next loop tick the
+    engine knows the customer has NOT replied yet if the same text is still visible.
     """
     with _state_lock:
         states = _load_states()
@@ -352,7 +366,8 @@ def mark_bot_reply_sent(sender_phone: str, step_sent: int) -> None:
         states[sender_phone] = {
             "step": step_sent,
             "waiting_for_customer": (step_sent < 3),
-            "last_customer_msg_time": 0,  # Reset: wait for next customer message
+            "last_customer_msg_time": 0,            # Reset: wait for next customer message
+            "last_replied_text": triggered_by_text, # Remember what we already replied to
             "updated_at": now,
         }
         _save_states(states)
