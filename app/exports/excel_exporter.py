@@ -56,11 +56,11 @@ def format_ist_timestamp(dt) -> str:
     if not dt:
         return ""
     if isinstance(dt, str):
-        return dt
+        return dt.split()[0]
     # If naive, treat as UTC
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S")
+    return dt.astimezone(IST).strftime("%Y-%m-%d")
 
 def format_phone_display(raw_phone: str) -> str:
     p = "".join(filter(str.isdigit, str(raw_phone or "")))
@@ -134,7 +134,14 @@ def _write_to_workbook(file_path: str, customer) -> None:
     phone_display = format_phone_display(customer.whatsapp_number)
     first_ts = format_ist_timestamp(customer.first_contact_at)
     last_ts = format_ist_timestamp(customer.last_contact_at)
-    name = customer.contact_person_name or ""
+    
+    # Priority: 1. Contact person / profile name, 2. Company name fallback
+    contact_val = (customer.contact_person_name or "").strip()
+    company = (customer.company_name or "").strip()
+    if not contact_val or contact_val.lower() in ("customer", "none", ""):
+        contact_val = company
+    
+    name = contact_val
     email = customer.email or ""
     company = customer.company_name or ""
     gst = customer.gst_number or ""
@@ -198,7 +205,14 @@ def _write_to_csv(file_path: str, customer) -> None:
     phone_display = format_phone_display(customer.whatsapp_number)
     first_ts = format_ist_timestamp(customer.first_contact_at)
     last_ts = format_ist_timestamp(customer.last_contact_at)
-    name = customer.contact_person_name or ""
+    
+    # Priority: 1. Contact person / profile name, 2. Company name fallback
+    contact_val = (customer.contact_person_name or "").strip()
+    company = (customer.company_name or "").strip()
+    if not contact_val or contact_val.lower() in ("customer", "none", ""):
+        contact_val = company
+    
+    name = contact_val
     email = customer.email or ""
     company = customer.company_name or ""
     gst = customer.gst_number or ""
