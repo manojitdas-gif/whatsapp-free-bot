@@ -175,11 +175,7 @@ def _write_to_workbook(file_path: str, customer) -> None:
         if gst: ws.cell(row=match_row, column=7, value=gst)
         if address: ws.cell(row=match_row, column=8, value=address)
         if reqs:
-            existing_req = str(ws.cell(row=match_row, column=9).value or "").strip()
-            if not existing_req:
-                ws.cell(row=match_row, column=9, value=reqs)
-            elif reqs.lower() not in existing_req.lower():
-                ws.cell(row=match_row, column=9, value=f"{existing_req}\n{reqs}")
+            ws.cell(row=match_row, column=9, value=reqs)
     else:
         new_row = first_empty if first_empty else (ws.max_row + 1)
         row_vals = [first_ts, last_ts, name, phone_display, email, company, gst, address, reqs]
@@ -238,11 +234,7 @@ def _write_to_csv(file_path: str, customer) -> None:
         if gst: rows[match_idx][6] = gst
         if address: rows[match_idx][7] = address
         if reqs:
-            cur_req = rows[match_idx][8] if len(rows[match_idx]) > 8 else ""
-            if not cur_req:
-                rows[match_idx][8] = reqs
-            elif reqs.lower() not in cur_req.lower():
-                rows[match_idx][8] = f"{cur_req} | {reqs}"
+            rows[match_idx][8] = reqs
     else:
         rows.append([first_ts, last_ts, name, phone_display, email, company, gst, address, reqs])
 
