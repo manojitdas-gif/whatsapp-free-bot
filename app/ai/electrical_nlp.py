@@ -118,12 +118,24 @@ IGNORE_UI_PHRASES = (
     "account", "customer"
 )
 
-CHAT_CHATTER_PHRASES = (
-    "download", "attached", ".xlsx", ".pdf", ".png", ".jpg", "document", "photo", "image",
-    "needed", "costly", "delivery is", "acha", "wala", "hoga", "kardo", "bhejo", "kya", "hai",
-    "please share", "quotation", "rate", "price", "batao", "kaise", "kab tak", "brand preference",
-    "regret", "delivery", "sir", "bhaiya", "ok sir"
+CHATTER_EXCLUDE_REGEX = re.compile(
+    r'\b(acha|wala|hoga|kardo|bhejo|kya|hai|rate|price|batao|kaise|kab tak|bhaiya|ok sir|regret|costly)\b',
+    re.IGNORECASE
 )
+CHAT_PHRASES_LITERAL = (
+    "download", "attached", ".xlsx", ".pdf", ".png", ".jpg", "document", "photo", "image",
+    "delivery is", "please share", "quotation", "brand preference", "best price"
+)
+
+def is_noise_or_chatter(text: str) -> bool:
+    if not text:
+        return False
+    lower = text.lower()
+    if any(p in lower for p in CHAT_PHRASES_LITERAL):
+        return True
+    if CHATTER_EXCLUDE_REGEX.search(lower):
+        return True
+    return False
 
 def extract_company_name(text: str) -> Optional[str]:
     if not text:
@@ -135,10 +147,10 @@ def extract_company_name(text: str) -> Optional[str]:
         lower = line_clean.lower()
         if any(lower.startswith(prefix) for prefix in ("company:", "business:", "firm:", "shop:", "company name:", "firm name:", "m/s:", "m/s ")):
             clean = re.sub(r'^(?:company name|firm name|company|business|firm|shop|m/s)[\s:-]+', '', line_clean, flags=re.IGNORECASE).strip()
-            if len(clean) >= 3 and len(clean) <= 60 and not any(p in clean.lower() for p in IGNORE_UI_PHRASES) and not any(p in clean.lower() for p in CHAT_CHATTER_PHRASES):
+            if len(clean) >= 3 and len(clean) <= 60 and not any(p in clean.lower() for p in IGNORE_UI_PHRASES) and not is_noise_or_chatter(clean):
                 return clean.title()
 
-    # 2. Strong legal entity pattern (e.g. <Name> Private Limited / Pvt Ltd / Limited / Ltd / Enterprises / Industries)
+    # 2. Strong legal entity pattern
     text_clean = re.sub(r'\bm/s\.?\s*', '', text, flags=re.IGNORECASE)
     legal_m = re.search(
         r'\b([A-Za-z0-9\s&().]{3,50}?\b(?:Private Limited|Pvt Ltd|Pvt\. Ltd\.|Limited|Ltd|Enterprises|Industries|Electricals|Electric|Traders|Corporation))\b',
@@ -148,7 +160,7 @@ def extract_company_name(text: str) -> Optional[str]:
     if legal_m:
         cand = legal_m.group(1).strip()
         cand_l = cand.lower()
-        if not any(p in cand_l for p in IGNORE_UI_PHRASES) and not any(p in cand_l for p in CHAT_CHATTER_PHRASES):
+        if not any(p in cand_l for p in IGNORE_UI_PHRASES) and not is_noise_or_chatter(cand_l):
             return cand.title()
 
     # 3. Pattern: from <Company> or at <Company>
@@ -160,14 +172,14 @@ def extract_company_name(text: str) -> Optional[str]:
     if from_m:
         cand = from_m.group(1).strip()
         cand_l = cand.lower()
-        if not any(p in cand_l for p in IGNORE_UI_PHRASES) and not any(p in cand_l for p in CHAT_CHATTER_PHRASES):
+        if not any(p in cand_l for p in IGNORE_UI_PHRASES) and not is_noise_or_chatter(cand_l):
             return cand.title()
 
     # 4. Line scan with strict indicator
     for line in text.splitlines():
         line_clean = line.strip()
         lower = line_clean.lower()
-        if any(p in lower for p in IGNORE_UI_PHRASES) or any(p in lower for p in CHAT_CHATTER_PHRASES):
+        if any(p in lower for p in IGNORE_UI_PHRASES) or is_noise_or_chatter(lower):
             continue
         if "?" in line_clean:
             continue
@@ -176,7 +188,7 @@ def extract_company_name(text: str) -> Optional[str]:
             continue
         if any(ind in lower for ind in ("electricals", "electric", "enterprises", "traders", "industries", "pvt ltd", "ltd", "corporation", "hardware store")) and len(line_clean) < 60:
             clean = re.sub(r'^(?:company|business|firm|shop|org|name)[\s:-]+', '', line_clean, flags=re.IGNORECASE).strip()
-            if len(clean) >= 3 and not any(p in clean.lower() for p in IGNORE_UI_PHRASES) and not any(p in clean.lower() for p in CHAT_CHATTER_PHRASES):
+            if len(clean) >= 3 and not any(p in clean.lower() for p in IGNORE_UI_PHRASES) and not is_noise_or_chatter(clean.lower()):
                 return clean.title()
     return None
 
@@ -200,7 +212,15 @@ def extract_address(text: str) -> Optional[str]:
     if not text:
         return None
     matched_address_parts = []
-    lines = [s.strip() for s in re.split(r'[\r\n.]+', text) if s.strip()]
+    # Split by newlines first to preserve address lines like 'Shop No. 4, Gali No. 2, Industrial Area, Baddi'
+    raw_lines = [s.strip() for s in text.splitlines() if s.strip()]
+    lines = []
+    for rl in raw_lines:
+        # Also split sentences if line contains multiple sentences
+        if ". " in rl:
+            lines.extend([part.strip() for part in rl.split(". ") if part.strip()])
+        else:
+            lines.append(rl)
     
     # Check for 'from <Company> <Location>' pattern (e.g. 'I am kamal yadav from him Trading co Baddi Himachal Pradesh')
     intro_loc_m = re.search(
@@ -217,7 +237,7 @@ def extract_address(text: str) -> Optional[str]:
     for line in lines:
         lower = line.lower()
         # Reject questions, chat chatter, and UI noise immediately
-        if "?" in line or any(p in lower for p in IGNORE_UI_PHRASES) or any(p in lower for p in CHAT_CHATTER_PHRASES):
+        if "?" in line or any(p in lower for p in IGNORE_UI_PHRASES) or is_noise_or_chatter(lower):
             continue
 
         has_pin = bool(PIN_CODE_REGEX.search(line))
@@ -232,18 +252,10 @@ def extract_address(text: str) -> Optional[str]:
                 return clean
 
         # Legitimate address line: has pin code OR (has premise/street + city/state) OR (has city + state)
-        if has_pin or (has_street and (has_city or has_state) and len(line) >= 10) or (has_city and has_state and len(line) >= 8):
+        if has_pin or (has_street and (has_city or has_state) and len(line) >= 8) or (has_city and has_state and len(line) >= 6):
             # Exclude lines that are purely product orders or short chatter
             if not any(pk in lower for pk in ("bulb", "mcb", "wire", "cable", "fan", "switch", "watt", "pcs")):
                 clean_line = line.replace('\r', '').strip()
-                snippet_m = re.search(r'(\d+[\s\w,.-]+(?:st|street|road|rd|lane|nagar|park|bazar|market)[\s\w,.-]*(?:[A-Za-z\s]+)\b)', clean_line, re.IGNORECASE)
-                if snippet_m and (has_city or has_state):
-                    clean_line = snippet_m.group(1).strip()
-                elif has_street and "," in clean_line:
-                    parts = [p.strip() for p in clean_line.split(",") if any(sm in p.lower() for sm in STREET_MARKERS) or any(cm in p.lower() for cm in CITY_MARKERS) or any(st in p.lower() for st in STATE_MARKERS) or PIN_CODE_REGEX.search(p)]
-                    if parts:
-                        clean_line = ", ".join(parts)
-
                 if clean_line and clean_line not in matched_address_parts:
                     matched_address_parts.append(clean_line)
 
@@ -257,7 +269,7 @@ def extract_contact_name(text: str, profile_name: Optional[str] = None) -> Optio
     if profile_name:
         clean_p = profile_name.strip()
         lower_p = clean_p.lower()
-        if not any(p in lower_p for p in IGNORE_UI_PHRASES) and not any(p in lower_p for p in CHAT_CHATTER_PHRASES):
+        if not any(p in lower_p for p in IGNORE_UI_PHRASES) and not is_noise_or_chatter(lower_p):
             if len(clean_p) >= 2 and len(clean_p) <= 30 and not clean_p.replace('+', '').replace(' ', '').isdigit():
                 return clean_p.title()
 
@@ -269,7 +281,7 @@ def extract_contact_name(text: str, profile_name: Optional[str] = None) -> Optio
     if m:
         candidate = m.group(1).strip()
         cand_l = candidate.lower()
-        if cand_l not in ("here", "interested", "need", "we", "hi", "sir") and not any(p in cand_l for p in IGNORE_UI_PHRASES) and not any(p in cand_l for p in CHAT_CHATTER_PHRASES):
+        if cand_l not in ("here", "interested", "need", "we", "hi", "sir") and not any(p in cand_l for p in IGNORE_UI_PHRASES) and not is_noise_or_chatter(cand_l):
             return candidate.title()
         
     return None
