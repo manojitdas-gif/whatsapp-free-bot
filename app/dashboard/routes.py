@@ -67,19 +67,15 @@ async def export_excel_download():
 @router.get("/api/reset-phone")
 async def reset_phone_guard(phone: str = Query(...)):
     """
-    Emergency: Clear phone_flow_guard so the bot can reply again to a given number.
+    Emergency: Clear phone_flow_guard so the bot starts completely fresh from Step 1.
     Usage: /api/reset-phone?phone=8765197073
     """
-    import sqlite3
+    import re
+    from app.ai.conversation_agent import reset_phone_guard_record
+    phone_digits = re.sub(r"[^0-9]", "", phone)[-10:]
     try:
-        db_path = os.path.join(settings.DATA_DIR, "whatsapp_production.db")
-        conn = sqlite3.connect(db_path)
-        cur = conn.cursor()
-        cur.execute("DELETE FROM phone_flow_guard WHERE phone = ?", (phone,))
-        conn.commit()
-        deleted = cur.rowcount
-        conn.close()
-        return {"status": "ok", "phone": phone, "rows_deleted": deleted}
+        reset_phone_guard_record(phone_digits)
+        return {"status": "ok", "phone": phone_digits, "message": f"Phone {phone_digits} reset fresh. Next message starts from Step 1 (Response 2)!"}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
@@ -92,13 +88,13 @@ async def db_status(phone: str = Query(None)):
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
         if phone:
-            cur.execute("SELECT phone, response_1_sent, response_2_sent, response_3_sent, is_completed, COALESCE(post_help_sent,0), last_response FROM phone_flow_guard WHERE phone = ?", (phone,))
+            cur.execute("SELECT phone, response_1_sent, response_2_sent, response_3_sent, is_completed, COALESCE(post_help_sent,0), last_response, COALESCE(reset_at,0) FROM phone_flow_guard WHERE phone = ?", (phone,))
             rows = cur.fetchall()
         else:
-            cur.execute("SELECT phone, response_1_sent, response_2_sent, response_3_sent, is_completed, COALESCE(post_help_sent,0), last_response FROM phone_flow_guard ORDER BY rowid DESC LIMIT 20")
+            cur.execute("SELECT phone, response_1_sent, response_2_sent, response_3_sent, is_completed, COALESCE(post_help_sent,0), last_response, COALESCE(reset_at,0) FROM phone_flow_guard ORDER BY rowid DESC LIMIT 20")
             rows = cur.fetchall()
         conn.close()
-        return {"records": [{"phone": r[0], "r1": r[1], "r2": r[2], "r3": r[3], "completed": r[4], "post_help_sent": r[5], "last_response": r[6]} for r in rows]}
+        return {"records": [{"phone": r[0], "r1": r[1], "r2": r[2], "r3": r[3], "completed": r[4], "post_help_sent": r[5], "last_response": r[6], "reset_at": r[7]} for r in rows]}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
@@ -110,7 +106,8 @@ async def full_reset_phone(phone: str = Query(...), db: Session = Depends(get_db
     Use this to test the complete bot flow fresh from a phone number.
     Usage: /api/full-reset?phone=8765197073
     """
-    import sqlite3, re
+    import re
+    from app.ai.conversation_agent import reset_phone_guard_record
     phone_digits = re.sub(r"[^0-9]", "", phone)[-10:]
     results = {}
 
@@ -131,7 +128,6 @@ async def full_reset_phone(phone: str = Query(...), db: Session = Depends(get_db
                 deleted_msgs += 1
                 db.delete(conv)
                 deleted_convs += 1
-            # Delete extracted data and response logs if they exist
             try:
                 db.query(ExtractedData).filter(ExtractedData.customer_id == cust.id).delete()
             except Exception:
@@ -147,18 +143,13 @@ async def full_reset_phone(phone: str = Query(...), db: Session = Depends(get_db
         results["conversations_deleted"] = deleted_convs
         results["messages_deleted"] = deleted_msgs
 
-        # 2. Clear phone_flow_guard via raw SQLite
-        db_path = os.path.join(settings.DATA_DIR, "whatsapp_production.db")
-        conn = sqlite3.connect(db_path)
-        cur = conn.cursor()
-        cur.execute("DELETE FROM phone_flow_guard WHERE phone = ?", (phone_digits,))
-        conn.commit()
-        results["guard_deleted"] = cur.rowcount
-        conn.close()
+        # 2. Reset phone_flow_guard with current timestamp so all old chat history is ignored
+        reset_phone_guard_record(phone_digits)
+        results["guard_reset"] = True
 
         results["status"] = "ok"
         results["phone"] = phone_digits
-        results["message"] = f"Phone {phone_digits} fully reset. Ready for fresh bot flow test!"
+        results["message"] = f"Phone {phone_digits} fully wiped & reset fresh. Ready for complete bot flow test!"
         return results
     except Exception as e:
         db.rollback()
