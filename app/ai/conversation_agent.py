@@ -36,9 +36,13 @@ def init_flow_guard_db():
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        # Ensure post_help_sent column exists in existing databases
+        # Ensure post_help_sent and reset_at columns exist in existing databases
         try:
             cur.execute("ALTER TABLE phone_flow_guard ADD COLUMN post_help_sent BOOLEAN DEFAULT 0")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE phone_flow_guard ADD COLUMN reset_at INTEGER DEFAULT 0")
         except Exception:
             pass
         conn.commit()
@@ -72,7 +76,7 @@ def get_phone_guard_state(phone_digits: str) -> Dict[str, Any]:
         db_path = os.path.join(settings.DATA_DIR, "whatsapp_production.db")
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
-        cur.execute("SELECT response_1_sent, response_2_sent, response_3_sent, is_completed, last_response, COALESCE(post_help_sent, 0) FROM phone_flow_guard WHERE phone = ?", (phone_digits,))
+        cur.execute("SELECT response_1_sent, response_2_sent, response_3_sent, is_completed, last_response, COALESCE(post_help_sent, 0), COALESCE(reset_at, 0) FROM phone_flow_guard WHERE phone = ?", (phone_digits,))
         row = cur.fetchone()
         conn.close()
         if row:
@@ -82,7 +86,8 @@ def get_phone_guard_state(phone_digits: str) -> Dict[str, Any]:
                 "response_3_sent": bool(row[2]),
                 "is_completed": bool(row[3]),
                 "last_response": row[4],
-                "post_help_sent": bool(row[5])
+                "post_help_sent": bool(row[5]),
+                "reset_at": int(row[6])
             }
     except Exception as e:
         logger.warning(f"[AGENT] Error reading phone_flow_guard: {e}")
@@ -92,8 +97,36 @@ def get_phone_guard_state(phone_digits: str) -> Dict[str, Any]:
         "response_3_sent": False,
         "is_completed": False,
         "last_response": None,
-        "post_help_sent": False
+        "post_help_sent": False,
+        "reset_at": 0
     }
+
+def reset_phone_guard_record(phone_digits: str, reset_timestamp: int = 0):
+    """Resets phone guard and sets reset_at so all past chat history is ignored."""
+    try:
+        import time as _time
+        ts = reset_timestamp or int(_time.time())
+        db_path = os.path.join(settings.DATA_DIR, "whatsapp_production.db")
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute('''
+            INSERT INTO phone_flow_guard (phone, response_1_sent, response_2_sent, response_3_sent, is_completed, last_response, post_help_sent, reset_at, updated_at)
+            VALUES (?, 0, 0, 0, 0, NULL, 0, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(phone) DO UPDATE SET
+                response_1_sent = 0,
+                response_2_sent = 0,
+                response_3_sent = 0,
+                is_completed = 0,
+                last_response = NULL,
+                post_help_sent = 0,
+                reset_at = excluded.reset_at,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (phone_digits, ts))
+        conn.commit()
+        conn.close()
+        logger.info(f"[AGENT] Reset phone guard for {phone_digits} with reset_at={ts}")
+    except Exception as e:
+        logger.warning(f"[AGENT] Error resetting phone_flow_guard: {e}")
 
 def update_phone_guard_state(phone_digits: str, sent_response: str):
     try:
@@ -145,7 +178,7 @@ def fetch_chat_history_from_gateway(phone: str, count: int = 25) -> List[Dict[st
 class AgentDecision:
     def __init__(self, action: str, response_type: Optional[str] = None, reply_text: Optional[str] = None, reason: str = "", extraction: Optional[ExtractionResult] = None):
         self.action = action  # 'REPLY' | 'SILENCE'
-        self.response_type = response_type  # 'RESPONSE_1' | 'RESPONSE_2' | 'RESPONSE_3'
+        self.response_type = response_type  # 'RESPONSE_1' | 'RESPONSE_2' | 'RESPONSE_3' | 'RESPONSE_POST_COMPLETION'
         self.reply_text = reply_text
         self.reason = reason
         self.extraction = extraction
@@ -165,12 +198,13 @@ def evaluate_customer_with_ai_agent(
     """
     phone_digits = re.sub(r'[^0-9]', '', phone)[-10:]
     guard = get_phone_guard_state(phone_digits)
+    reset_ts = guard.get("reset_at", 0) or 0
 
     lower_text = (incoming_text or "").strip().lower()
     is_greeting = lower_text in ("hi", "hello", "hey", "namaste", "namaskar", "start", "info", "help", "hii", "helo")
     is_followup = is_conversational_followup(incoming_text)
 
-    # 1. Post-Completion Check: If flow already completed, any message triggers ONE help message
+    # 1. Post-Completion Check: ONLY if flow was completed in our persistent DB
     if guard["is_completed"] or guard["response_1_sent"]:
         if not guard.get("post_help_sent"):
             logger.info(f"[AGENT] Customer {phone} flow already completed. Triggering one post-completion help message.")
@@ -185,7 +219,19 @@ def evaluate_customer_with_ai_agent(
             logger.info(f"[AGENT] Customer {phone} post-completion help already sent once. Silencing follow-up.")
             return AgentDecision(action="SILENCE", reason="Post-completion help message already sent once.")
 
-    # 2. Fetch Live Chat History from WhatsApp Gateway if guard not marked completed
+    # 2. Greeting Check for New / Reset Customer (Flow NOT completed)
+    # Greetings ALWAYS start the conversation with Response 2
+    if is_greeting:
+        logger.info(f"[AGENT] New / reset customer {phone} sent greeting ('{incoming_text}'). Replying with Response 2.")
+        update_phone_guard_state(phone_digits, "RESPONSE_2")
+        return AgentDecision(
+            action="REPLY",
+            response_type="RESPONSE_2",
+            reply_text=get_response_template("RESPONSE_2"),
+            reason=f"Customer greeting '{incoming_text}' received. Starting flow with Response 2."
+        )
+
+    # 3. Fetch Live Chat History from WhatsApp Gateway (only messages AFTER reset_ts)
     raw_history = fetch_chat_history_from_gateway(phone, count=25)
     history_messages = list(reversed(raw_history)) if raw_history else []
 
@@ -197,18 +243,15 @@ def evaluate_customer_with_ai_agent(
     has_any_media_in_history = has_media or bool(media_text)
 
     for m in history_messages:
+        # Ignore messages sent before the last reset
+        m_ts = m.get("timestamp", 0)
+        if reset_ts and m_ts and m_ts < reset_ts:
+            continue
+
         m_type = m.get("type", "")
         text = m.get("textMessage", "") or m.get("caption", "") or ""
         
-        # Check outgoing
-        if m_type == "outgoing":
-            if "Thank you for sharing" in text or "formal quotation" in text:
-                past_r1_sent = True
-            elif "Business / Company Name" in text or "To prepare your quotation" in text:
-                past_r3_sent = True
-            elif "Welcome to our Electrical Dealership" in text or "Please share your requirement" in text:
-                past_r2_sent = True
-        elif m_type == "incoming":
+        if m_type == "incoming":
             msg_t = m.get("typeMessage", "")
             if msg_t in ("imageMessage", "documentMessage", "fileMessage"):
                 has_any_media_in_history = True
@@ -219,38 +262,12 @@ def evaluate_customer_with_ai_agent(
     if incoming_text and (not all_incoming_texts or all_incoming_texts[-1] != incoming_text):
         all_incoming_texts.append(incoming_text)
 
-    # Check if Response 1 was found in WhatsApp history
-    if past_r1_sent:
-        update_phone_guard_state(phone_digits, "RESPONSE_1")
-        if not guard.get("post_help_sent"):
-            logger.info(f"[AGENT] Response 1 found in live chat history for {phone}. Triggering one post-completion help message.")
-            update_phone_guard_state(phone_digits, "RESPONSE_POST_COMPLETION")
-            return AgentDecision(
-                action="REPLY",
-                response_type="RESPONSE_POST_COMPLETION",
-                reply_text=get_response_template("RESPONSE_POST_COMPLETION"),
-                reason="Response 1 found in chat history. Triggering one post-completion help message."
-            )
-        else:
-            return AgentDecision(action="SILENCE", reason="Flow completed and post-completion help message already sent.")
-
-    # 3. New Customer Greeting (Before flow completed)
-    if is_greeting:
-        logger.info(f"[AGENT] New customer {phone} sent greeting ('{incoming_text}'). Replying with Response 2.")
-        update_phone_guard_state(phone_digits, "RESPONSE_2")
-        return AgentDecision(
-            action="REPLY",
-            response_type="RESPONSE_2",
-            reply_text=get_response_template("RESPONSE_2"),
-            reason=f"Customer greeting '{incoming_text}' received. Providing welcome and requirements prompt."
-        )
-
     # 4. Check for Conversational Follow-up chatter after Response 3
     if is_followup and past_r3_sent:
         logger.info(f"[AGENT] Customer {phone} sent follow-up query after Response 3. Staying silent.")
         return AgentDecision(action="SILENCE", reason="Follow-up message after Response 3. No repeated prompt.")
 
-    # 4. Extract Cumulative Entities across ALL customer messages in history + documents/photos
+    # 5. Extract Cumulative Entities across ALL customer messages in history + documents/photos
     att_list = [media_text] if media_text else None
     extraction = analyze_conversation(all_incoming_texts, attachment_texts=att_list, profile_name=profile_name)
 
