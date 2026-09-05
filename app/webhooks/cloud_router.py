@@ -167,15 +167,13 @@ async def process_incoming_cloud_message(info: Dict[str, Any]):
             if name and (not customer.contact_person_name or customer.contact_person_name.lower() in ("customer", "none")):
                 customer.contact_person_name = name
 
-        # Strict silence check: If conversation already completed, do not reply further
-        is_completed = False
+        # Track completed phones in-memory for quick reference (AI agent makes the actual decision)
         comp_conv = db.query(Conversation).filter(
             Conversation.customer_id == customer.id,
             (Conversation.status == ConversationStatus.COMPLETED.value) |
             (Conversation.stage == ConversationStage.COMPLETED.value)
         ).first()
         if comp_conv:
-            is_completed = True
             _completed_phones.add(phone_digits)
         else:
             _completed_phones.discard(phone_digits)
