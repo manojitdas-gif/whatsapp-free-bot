@@ -244,10 +244,6 @@ async def process_incoming_cloud_message(info: Dict[str, Any]):
             elif new_req.lower() not in customer.requirements_summary.lower():
                 customer.requirements_summary = f"{customer.requirements_summary}\n{new_req}"
 
-        if not customer.contact_person_name or customer.contact_person_name.lower() in ("customer", "none"):
-            if customer.company_name:
-                customer.contact_person_name = customer.company_name
-
         db.commit()
 
         # Synchronize to Desktop Excel and Cloud Google Sheet
