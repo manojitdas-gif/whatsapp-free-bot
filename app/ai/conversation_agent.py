@@ -156,10 +156,25 @@ def evaluate_customer_with_ai_agent(
     phone_digits = re.sub(r'[^0-9]', '', phone)[-10:]
     guard = get_phone_guard_state(phone_digits)
 
-    # 1. Check Persistent Guard State First
-    if guard["is_completed"] or guard["response_1_sent"]:
-        logger.info(f"[AGENT] Customer {phone} inquiry already COMPLETED (Response 1 sent). Lifetime SILENCE.")
-        return AgentDecision(action="SILENCE", reason="Conversation already completed with Response 1.")
+    lower_text = (incoming_text or "").strip().lower()
+    is_greeting = lower_text in ("hi", "hello", "hey", "namaste", "namaskar", "start", "info", "help", "hii", "helo")
+    is_followup = is_conversational_followup(incoming_text)
+
+    # If customer sends an explicit greeting, ALWAYS reply with Welcome / Response 2
+    if is_greeting:
+        logger.info(f"[AGENT] Customer {phone} sent greeting ('{incoming_text}'). Replying with Response 2.")
+        update_phone_guard_state(phone_digits, "RESPONSE_2")
+        return AgentDecision(
+            action="REPLY",
+            response_type="RESPONSE_2",
+            reply_text=get_response_template("RESPONSE_2"),
+            reason=f"Customer greeting '{incoming_text}' received. Providing welcome and requirements prompt."
+        )
+
+    # 1. Check Persistent Guard State for Follow-up inquiries
+    if (guard["is_completed"] or guard["response_1_sent"]) and is_followup:
+        logger.info(f"[AGENT] Customer {phone} inquiry already COMPLETED. Follow-up inquiry ('{incoming_text}') silenced.")
+        return AgentDecision(action="SILENCE", reason="Conversation already completed with Response 1. Follow-up silenced.")
 
     # 2. Fetch Live Chat History from WhatsApp Gateway
     raw_history = fetch_chat_history_from_gateway(phone, count=25)
@@ -195,11 +210,11 @@ def evaluate_customer_with_ai_agent(
     if incoming_text and (not all_incoming_texts or all_incoming_texts[-1] != incoming_text):
         all_incoming_texts.append(incoming_text)
 
-    # Check if Response 1 was found in WhatsApp history
-    if past_r1_sent:
+    # Check if Response 1 was found in WhatsApp history and incoming is follow-up or chatter
+    if past_r1_sent and is_followup:
         update_phone_guard_state(phone_digits, "RESPONSE_1")
-        logger.info(f"[AGENT] Response 1 found in live WhatsApp chat history for {phone}. Staying silent.")
-        return AgentDecision(action="SILENCE", reason="Response 1 found in chat history.")
+        logger.info(f"[AGENT] Response 1 found in live WhatsApp chat history for {phone}. Follow-up silenced.")
+        return AgentDecision(action="SILENCE", reason="Response 1 found in chat history. Follow-up silenced.")
 
     # 3. Check for Conversational Follow-up chatter
     is_followup = is_conversational_followup(incoming_text)
