@@ -22,7 +22,7 @@ def transition_state(current_stage: str, next_action: str) -> str:
     """
     Computes valid deterministic state transition.
     """
-    if next_action == "RESPONSE_1":
+    if next_action in ("RESPONSE_1", "RESPONSE_POST_COMPLETION"):
         return ConversationStage.COMPLETED.value
     elif next_action == "RESPONSE_2":
         return ConversationStage.WAITING_FOR_PRODUCT_REQUIREMENTS.value
