@@ -93,9 +93,8 @@ def clean_contact_name(name: Optional[str], company: Optional[str] = None) -> st
     )
 
     if is_invalid:
-        # Fallback to cleaned company name
-        c_clean = clean_company_name(company)
-        return c_clean if c_clean else ""
+        # If no valid personal contact name exists, leave BLANK (do not cross-pollute with company name)
+        return ""
 
     return cleaned.title()
 
@@ -135,8 +134,16 @@ def clean_company_name(raw_company: Optional[str]) -> str:
     # Strip prefixes: M/s, M/S, Messrs, Company:, Firm:, Shop Name:
     clean = re.sub(r'^(?:m/s\.?|messrs\.?|company(?:\s+name)?|firm(?:\s+name)?|shop(?:\s+name)?|business)[\s:-]+', '', clean, flags=re.IGNORECASE).strip()
     
-    # Reject business dealer taglines
     lower = clean.lower()
+    # Reject product specification lines and catalog manufacturer headers (not customer business)
+    if any(spec in lower for spec in (
+        "model number", "model no", "manufacturer", "cat no", "product dimensions",
+        "finish type", "part number", "technical details", "item weight", "voltage",
+        "colour", "material pvc", "about this item"
+    )):
+        return ""
+
+    # Reject business dealer taglines
     for tag in DEALER_TAGLINES:
         if lower.startswith(tag):
             return ""
