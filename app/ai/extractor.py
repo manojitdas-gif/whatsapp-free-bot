@@ -4,6 +4,7 @@ Analyzes the entire conversation history, merges fields deterministically, and p
 a verified ExtractionResult.
 """
 
+import re
 from typing import List, Optional
 from app.schemas.extraction import ExtractionResult, ProductItem
 from app.ai.electrical_nlp import (
@@ -46,10 +47,12 @@ def analyze_conversation(
             lower = clean.lower()
             if "?" in clean:
                 continue
-            # Skip introductions, address lines, business details, bot prompts, questions
-            if any(k in lower for k in ("gst", "email", "address", "company", "my name is", "i am", "street", "road", "lane", "pin", "kolkata", "bengal", "thank you", "please share", "quotation", "regret", "costly", "delivery is", "chaheye", "kardo")):
+            # Skip introductions, address lines, business details, bot prompts, questions, price requests
+            if any(k in lower for k in ("gst", "email", "address", "company", "my name is", "i am", "street", "road", "lane", "pin", "kolkata", "bengal", "thank you", "please share", "quotation", "regret", "costly", "delivery is", "chaheye", "kardo", "price", "rate", "deleted this message")):
                 continue
-            if any(w in lower for w in ("need", "want", "require", "send", "rate", "price", "order", "item", "bulb", "fan", "wire", "cable", "switch", "mcb", "watt", "pcs", "nos")):
+            has_product_word = any(w in lower for w in ("bulb", "fan", "wire", "cable", "switch", "socket", "mcb", "pipe", "heater", "motor", "relay", "meter", "conduit", "led", "light"))
+            has_unit_word = bool(re.search(r'\b\d+\s*(?:pcs|pc|nos|no|meter|mtr|m|watt|w|inch|mm)\b', lower))
+            if has_product_word or has_unit_word:
                 raw_req = clean
                 break
 
