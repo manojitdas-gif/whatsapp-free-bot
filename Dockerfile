@@ -1,22 +1,21 @@
-# 100% Free 24/7 Cloud Dockerfile for WhatsApp Automation Engine
-FROM mcr.microsoft.com/playwright/python:v1.42.0-jammy
+# 24/7 Cloud Webhook Bot for WhatsApp Automation Engine
+FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONUTF8=1
-ENV HEADLESS=true
-ENV PORT=8080
+ENV PORT=10000
 
 WORKDIR /app
 
 # Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir --break-system-packages -r requirements.txt || pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy all application files
 COPY . .
 
-# Expose cloud health port
-EXPOSE 8080
+# Expose cloud port
+EXPOSE 10000
 
-# Start 24/7 WhatsApp engine
-CMD ["python3", "-u", "whatsapp_web_engine.py"]
+# Start Cloud Webhook Engine (FastAPI on Uvicorn)
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000}"]
