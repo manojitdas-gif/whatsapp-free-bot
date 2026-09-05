@@ -49,6 +49,8 @@ async def health_check():
         "app": settings.APP_NAME,
         "provider": settings.WHATSAPP_PROVIDER,
         "gateway_type": settings.GATEWAY_TYPE,
+        "gateway_instance_id": settings.GATEWAY_INSTANCE_ID,
+        "gateway_api_url": settings.GATEWAY_API_URL,
         "google_sheets_sync": bool(settings.GOOGLE_SHEET_WEBHOOK_URL),
         "timezone": settings.TIMEZONE,
         "debounce_seconds": settings.DEBOUNCE_SECONDS
