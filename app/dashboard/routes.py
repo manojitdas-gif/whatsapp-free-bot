@@ -63,3 +63,41 @@ async def export_excel_download():
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     return {"error": "Excel file not generated yet."}
+
+@router.get("/api/reset-phone")
+async def reset_phone_guard(phone: str = Query(...)):
+    """
+    Emergency: Clear phone_flow_guard so the bot can reply again to a given number.
+    Usage: /api/reset-phone?phone=8765197073
+    """
+    import sqlite3
+    try:
+        db_path = os.path.join(settings.DATA_DIR, "whatsapp_production.db")
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM phone_flow_guard WHERE phone = ?", (phone,))
+        conn.commit()
+        deleted = cur.rowcount
+        conn.close()
+        return {"status": "ok", "phone": phone, "rows_deleted": deleted}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+@router.get("/api/db-status")
+async def db_status(phone: str = Query(None)):
+    """Check phone_flow_guard state on Render's cloud DB."""
+    import sqlite3
+    try:
+        db_path = os.path.join(settings.DATA_DIR, "whatsapp_production.db")
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        if phone:
+            cur.execute("SELECT phone, response_1_sent, response_2_sent, response_3_sent, is_completed, COALESCE(post_help_sent,0), last_response FROM phone_flow_guard WHERE phone = ?", (phone,))
+            rows = cur.fetchall()
+        else:
+            cur.execute("SELECT phone, response_1_sent, response_2_sent, response_3_sent, is_completed, COALESCE(post_help_sent,0), last_response FROM phone_flow_guard ORDER BY rowid DESC LIMIT 20")
+            rows = cur.fetchall()
+        conn.close()
+        return {"records": [{"phone": r[0], "r1": r[1], "r2": r[2], "r3": r[3], "completed": r[4], "post_help_sent": r[5], "last_response": r[6]} for r in rows]}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
