@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database.session import init_db
 from app.webhooks.whatsapp_router import router as webhook_router
+from app.webhooks.cloud_router import router as cloud_router
 from app.dashboard.routes import router as dashboard_router
 
 @asynccontextmanager
@@ -38,6 +39,7 @@ app.add_middleware(
 
 # Mount Webhooks and Dashboard
 app.include_router(webhook_router)
+app.include_router(cloud_router)
 app.include_router(dashboard_router)
 
 @app.get("/health")
@@ -46,6 +48,8 @@ async def health_check():
         "status": "healthy",
         "app": settings.APP_NAME,
         "provider": settings.WHATSAPP_PROVIDER,
+        "gateway_type": settings.GATEWAY_TYPE,
+        "google_sheets_sync": bool(settings.GOOGLE_SHEET_WEBHOOK_URL),
         "timezone": settings.TIMEZONE,
         "debounce_seconds": settings.DEBOUNCE_SECONDS
     }
