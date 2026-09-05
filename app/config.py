@@ -41,12 +41,15 @@ class Settings(BaseSettings):
 
     # Cloud WhatsApp-Compatible Gateway Settings (Green API / Baileys Gateway)
     GATEWAY_TYPE: str = "green_api"  # "green_api", "evolution", or "local_web"
-    GATEWAY_INSTANCE_ID: Optional[str] = os.getenv("GATEWAY_INSTANCE_ID", None)
-    GATEWAY_API_TOKEN: Optional[str] = os.getenv("GATEWAY_API_TOKEN", None)
+    GATEWAY_INSTANCE_ID: Optional[str] = os.getenv("GATEWAY_INSTANCE_ID", "710522726064")
+    GATEWAY_API_TOKEN: Optional[str] = os.getenv("GATEWAY_API_TOKEN", "52d9555e5c6b4c65b3ebc1119abb5e62bf64e52d8dde4ac7aa")
     GATEWAY_API_URL: str = os.getenv("GATEWAY_API_URL", "https://api.green-api.com")
 
     # Cloud Google Sheets Sync URL (Google Apps Script Webhook)
-    GOOGLE_SHEET_WEBHOOK_URL: Optional[str] = os.getenv("GOOGLE_SHEET_WEBHOOK_URL", None)
+    GOOGLE_SHEET_WEBHOOK_URL: Optional[str] = os.getenv(
+        "GOOGLE_SHEET_WEBHOOK_URL",
+        "https://script.google.com/macros/s/AKfycby-a2A6tpShmCJjeOVZ-dkNf2POJFiozd6Lz5cC6Krtsbv1qUgVUKq2eKir_DRnrf592A/exec"
+    )
 
     model_config = ConfigDict(env_file=".env", env_file_encoding="utf-8", extra="allow")
 
