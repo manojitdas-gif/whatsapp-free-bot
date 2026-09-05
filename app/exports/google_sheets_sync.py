@@ -34,11 +34,14 @@ async def sync_customer_to_google_sheet_async(customer) -> bool:
     from app.exports.data_sanitizer import sanitize_customer_model
     clean = sanitize_customer_model(customer)
 
+    phone_clean = clean["whatsapp_number"]
+    phone_payload = ("'" + phone_clean) if (phone_clean and not phone_clean.startswith("'")) else phone_clean
+
     payload = {
         "first_contact_date": clean["first_contact_date"],
         "last_contact_date": clean["last_contact_date"],
         "contact_person_name": clean["contact_person_name"],
-        "whatsapp_number": clean["whatsapp_number"],
+        "whatsapp_number": phone_payload,
         "email_id": clean["email_id"],
         "company_name": clean["company_name"],
         "gst_number": clean["gst_number"],
@@ -69,11 +72,14 @@ def sync_customer_to_google_sheet(customer) -> bool:
     from app.exports.data_sanitizer import sanitize_customer_model
     clean = sanitize_customer_model(customer)
 
+    phone_clean = clean["whatsapp_number"]
+    phone_payload = ("'" + phone_clean) if (phone_clean and not phone_clean.startswith("'")) else phone_clean
+
     payload = {
         "first_contact_date": clean["first_contact_date"],
         "last_contact_date": clean["last_contact_date"],
         "contact_person_name": clean["contact_person_name"],
-        "whatsapp_number": clean["whatsapp_number"],
+        "whatsapp_number": phone_payload,
         "email_id": clean["email_id"],
         "company_name": clean["company_name"],
         "gst_number": clean["gst_number"],
