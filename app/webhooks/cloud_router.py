@@ -345,7 +345,7 @@ async def process_incoming_cloud_message(info: Dict[str, Any]):
             logger.info("[CLOUD BOT] Sent %s to %s. Reason: %s", response_type, phone, agent_decision.reason)
 
         # Stage Transition
-        if response_type == "RESPONSE_1":
+        if response_type in ("RESPONSE_1", "RESPONSE_POST_COMPLETION"):
             conv.stage = ConversationStage.COMPLETED.value
             conv.status = ConversationStatus.COMPLETED.value
             _completed_phones.add(phone_digits)
