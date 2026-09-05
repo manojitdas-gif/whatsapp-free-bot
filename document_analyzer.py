@@ -258,7 +258,10 @@ def parse_product_details(raw_text: str) -> str:
         "--- page", "[page", "business info", "gst", "gstin", "email", "www.", "http",
         "document content", "thanks", "thank you", "contact person", "dear sir", "hello",
         "regards", "since :", "pin:", "road", "street", "bazar", "bazaar", "lane",
-        "where is", "call me", "how much", "send quote", "send quotation"
+        "where is", "call me", "how much", "send quote", "send quotation", "dealers in",
+        "dealer of", "all kinds of", "all types of", "stockist of", "authorized dealer",
+        "authorised dealer", "distributor of", "manufacturers of", "rate and availability",
+        "rate please", "price please", "best price", "batao", "kardo", "bhejo"
     ]
 
     for line in lines:
