@@ -39,6 +39,15 @@ class Settings(BaseSettings):
     # Business Rules
     REQUIRE_GST_MANDATORY: bool = False  # If True, GST is strictly mandatory unless explicitly "Not Applicable"
 
+    # Cloud WhatsApp-Compatible Gateway Settings (Green API / Baileys Gateway)
+    GATEWAY_TYPE: str = "green_api"  # "green_api", "evolution", or "local_web"
+    GATEWAY_INSTANCE_ID: Optional[str] = os.getenv("GATEWAY_INSTANCE_ID", None)
+    GATEWAY_API_TOKEN: Optional[str] = os.getenv("GATEWAY_API_TOKEN", None)
+    GATEWAY_API_URL: str = os.getenv("GATEWAY_API_URL", "https://api.green-api.com")
+
+    # Cloud Google Sheets Sync URL (Google Apps Script Webhook)
+    GOOGLE_SHEET_WEBHOOK_URL: Optional[str] = os.getenv("GOOGLE_SHEET_WEBHOOK_URL", None)
+
     model_config = ConfigDict(env_file=".env", env_file_encoding="utf-8", extra="allow")
 
 settings = Settings()
