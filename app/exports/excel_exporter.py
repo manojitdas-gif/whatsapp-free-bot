@@ -131,22 +131,18 @@ def _write_to_workbook(file_path: str, customer) -> None:
     wb = _get_or_create_workbook(file_path)
     ws = wb["Customer Leads"] if "Customer Leads" in wb.sheetnames else wb.active
 
-    phone_display = format_phone_display(customer.whatsapp_number)
-    first_ts = format_ist_timestamp(customer.first_contact_at)
-    last_ts = format_ist_timestamp(customer.last_contact_at)
+    from app.exports.data_sanitizer import sanitize_customer_model
+    clean = sanitize_customer_model(customer)
     
-    # Priority: 1. Contact person / profile name, 2. Company name fallback
-    contact_val = (customer.contact_person_name or "").strip()
-    company = (customer.company_name or "").strip()
-    if not contact_val or contact_val.lower() in ("customer", "none", ""):
-        contact_val = company
-    
-    name = contact_val
-    email = customer.email or ""
-    company = customer.company_name or ""
-    gst = customer.gst_number or ""
-    address = customer.complete_address or ""
-    reqs = customer.requirements_summary or ""
+    first_ts = clean["first_contact_date"]
+    last_ts = clean["last_contact_date"]
+    name = clean["contact_person_name"]
+    phone_display = clean["whatsapp_number"]
+    email = clean["email_id"]
+    company = clean["company_name"]
+    gst = clean["gst_number"]
+    address = clean["complete_address"]
+    reqs = clean["requirements_summary"]
 
     # Find existing row by 10-digit normalized phone number to guarantee in-place update
     cust_digits = "".join(filter(str.isdigit, str(customer.whatsapp_number or "")))[-10:]
@@ -200,22 +196,18 @@ def _write_to_csv(file_path: str, customer) -> None:
     if not rows:
         rows = [HEADERS]
 
-    phone_display = format_phone_display(customer.whatsapp_number)
-    first_ts = format_ist_timestamp(customer.first_contact_at)
-    last_ts = format_ist_timestamp(customer.last_contact_at)
+    from app.exports.data_sanitizer import sanitize_customer_model
+    clean = sanitize_customer_model(customer)
     
-    # Priority: 1. Contact person / profile name, 2. Company name fallback
-    contact_val = (customer.contact_person_name or "").strip()
-    company = (customer.company_name or "").strip()
-    if not contact_val or contact_val.lower() in ("customer", "none", ""):
-        contact_val = company
-    
-    name = contact_val
-    email = customer.email or ""
-    company = customer.company_name or ""
-    gst = customer.gst_number or ""
-    address = customer.complete_address or ""
-    reqs = customer.requirements_summary or ""
+    first_ts = clean["first_contact_date"]
+    last_ts = clean["last_contact_date"]
+    name = clean["contact_person_name"]
+    phone_display = clean["whatsapp_number"]
+    email = clean["email_id"]
+    company = clean["company_name"]
+    gst = clean["gst_number"]
+    address = clean["complete_address"]
+    reqs = clean["requirements_summary"]
 
     cust_digits = "".join(filter(str.isdigit, str(customer.whatsapp_number or "")))[-10:]
     match_idx = None
