@@ -49,12 +49,19 @@ function doPost(e) {
       }
     }
     
+    // Safe phone string formatted with single-quote prefix so Google Sheets never evaluates it as a formula error
+    var rawPhone = String(data.whatsapp_number || "").trim();
+    var phoneText = rawPhone;
+    if (phoneText && !phoneText.startsWith("'")) {
+      phoneText = "'" + phoneText;
+    }
+
     // Row data to set (9 columns)
     var rowData = [
       data.first_contact_date || Utilities.formatDate(new Date(), "Asia/Kolkata", "yyyy-MM-dd"),
       data.last_contact_date || Utilities.formatDate(new Date(), "Asia/Kolkata", "yyyy-MM-dd"),
       data.contact_person_name || data.company_name || "",
-      data.whatsapp_number || "",
+      phoneText,
       data.email_id || "",
       data.company_name || "",
       data.gst_number || "",
