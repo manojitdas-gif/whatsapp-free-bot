@@ -34,7 +34,7 @@ def test_cloud_webhook_greeting_triggers_response_2():
     payload = {
         "typeWebhook": "incomingMessageReceived",
         "senderData": {
-            "sender": "919988776655@c.us",
+            "sender": "919876501234@c.us",
             "senderName": "Ramesh Gupta"
         },
         "messageData": {
@@ -47,10 +47,10 @@ def test_cloud_webhook_greeting_triggers_response_2():
     res = client.post("/webhook/cloud", json=payload)
     assert res.status_code == 200
     assert res.json()["status"] == "accepted"
-    assert res.json()["phone"] == "919988776655"
+    assert res.json()["phone"] == "919876501234"
 
     db = SessionLocal()
-    cust = db.query(Customer).filter(Customer.whatsapp_number.like("%9988776655%")).first()
+    cust = db.query(Customer).filter(Customer.whatsapp_number.like("%9876501234%")).first()
     assert cust is not None
     assert cust.contact_person_name == "Ramesh Gupta"
     db.close()
@@ -59,7 +59,7 @@ def test_cloud_webhook_document_triggers_response_3():
     payload = {
         "typeWebhook": "incomingMessageReceived",
         "senderData": {
-            "sender": "919988776655@c.us",
+            "sender": "919876501234@c.us",
             "senderName": "Ramesh Gupta"
         },
         "messageData": {
@@ -78,7 +78,7 @@ def test_cloud_webhook_business_details_triggers_response_1_and_completes():
     payload = {
         "typeWebhook": "incomingMessageReceived",
         "senderData": {
-            "sender": "919988776655@c.us",
+            "sender": "919876501234@c.us",
             "senderName": "Ramesh Gupta"
         },
         "messageData": {
@@ -92,7 +92,7 @@ def test_cloud_webhook_business_details_triggers_response_1_and_completes():
     assert res.status_code == 200
 
     db = SessionLocal()
-    cust = db.query(Customer).filter(Customer.whatsapp_number.like("%9988776655%")).first()
+    cust = db.query(Customer).filter(Customer.whatsapp_number.like("%9876501234%")).first()
     assert cust is not None
     assert cust.company_name == "Gupta Electricals"
     assert cust.gst_number == "19ABCDE1234F1Z5"
@@ -102,7 +102,7 @@ def test_cloud_webhook_ignores_chatter():
     payload = {
         "typeWebhook": "incomingMessageReceived",
         "senderData": {
-            "sender": "919988776655@c.us",
+            "sender": "919876501234@c.us",
             "senderName": "Ramesh Gupta"
         },
         "messageData": {
@@ -116,7 +116,7 @@ def test_cloud_webhook_ignores_chatter():
     assert res.status_code == 200
 
     db = SessionLocal()
-    cust = db.query(Customer).filter(Customer.whatsapp_number.like("%9988776655%")).first()
+    cust = db.query(Customer).filter(Customer.whatsapp_number.like("%9876501234%")).first()
     # Ensure conversational noise was NOT appended as requirements
     if cust.requirements_summary:
         assert "plz send your best possible price" not in cust.requirements_summary.lower()
