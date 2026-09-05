@@ -101,3 +101,66 @@ async def db_status(phone: str = Query(None)):
         return {"records": [{"phone": r[0], "r1": r[1], "r2": r[2], "r3": r[3], "completed": r[4], "post_help_sent": r[5], "last_response": r[6]} for r in rows]}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
+
+@router.get("/api/full-reset")
+async def full_reset_phone(phone: str = Query(...), db: Session = Depends(get_db)):
+    """
+    Full wipe of ALL data for a phone number across ALL tables.
+    Clears: customers, conversations, messages, phone_flow_guard.
+    Use this to test the complete bot flow fresh from a phone number.
+    Usage: /api/full-reset?phone=8765197073
+    """
+    import sqlite3, re
+    phone_digits = re.sub(r"[^0-9]", "", phone)[-10:]
+    results = {}
+
+    try:
+        # 1. Find and delete customer + related records via SQLAlchemy
+        from app.database.models import Customer, Conversation, Message, ResponseLog, ExtractedData
+        all_customers = db.query(Customer).all()
+        matched_customers = [c for c in all_customers if re.sub(r"[^0-9]", "", str(c.whatsapp_number or ""))[-10:] == phone_digits]
+
+        deleted_customers = 0
+        deleted_convs = 0
+        deleted_msgs = 0
+
+        for cust in matched_customers:
+            convs = db.query(Conversation).filter(Conversation.customer_id == cust.id).all()
+            for conv in convs:
+                db.query(Message).filter(Message.conversation_id == conv.id).delete()
+                deleted_msgs += 1
+                db.delete(conv)
+                deleted_convs += 1
+            # Delete extracted data and response logs if they exist
+            try:
+                db.query(ExtractedData).filter(ExtractedData.customer_id == cust.id).delete()
+            except Exception:
+                pass
+            try:
+                db.query(ResponseLog).filter(ResponseLog.customer_id == cust.id).delete()
+            except Exception:
+                pass
+            db.delete(cust)
+            deleted_customers += 1
+        db.commit()
+        results["customers_deleted"] = deleted_customers
+        results["conversations_deleted"] = deleted_convs
+        results["messages_deleted"] = deleted_msgs
+
+        # 2. Clear phone_flow_guard via raw SQLite
+        db_path = os.path.join(settings.DATA_DIR, "whatsapp_production.db")
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM phone_flow_guard WHERE phone = ?", (phone_digits,))
+        conn.commit()
+        results["guard_deleted"] = cur.rowcount
+        conn.close()
+
+        results["status"] = "ok"
+        results["phone"] = phone_digits
+        results["message"] = f"Phone {phone_digits} fully reset. Ready for fresh bot flow test!"
+        return results
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "detail": str(e)}
+
