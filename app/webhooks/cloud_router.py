@@ -265,6 +265,7 @@ async def process_incoming_cloud_message(info: Dict[str, Any]):
             incoming_text=text,
             has_media=bool(media_url or file_name or customer.requirements_summary),
             media_filename=file_name,
+            media_text=ocr_text,
             profile_name=name
         )
 
