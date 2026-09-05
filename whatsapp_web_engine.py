@@ -145,11 +145,16 @@ async def wait_for_login(page) -> bool:
             return True
 
         reload_btn = (
-            await page.query_selector('span[data-icon="refresh"]')
+            await page.query_selector('button:has-text("Click to reload QR code")')
+            or await page.query_selector('div[data-ref] button')
+            or await page.query_selector('span[data-icon="refresh"]')
             or await page.query_selector('div[role="button"]:has(span[data-icon="refresh"])')
         )
         if reload_btn:
-            try: await reload_btn.click(); await asyncio.sleep(1)
+            try:
+                await reload_btn.click()
+                print("[QR] 🔄 Clicked reload QR code button on page", flush=True)
+                await asyncio.sleep(2)
             except Exception: pass
 
         qr_el = await page.query_selector('canvas') or await page.query_selector('div[data-ref]')
@@ -162,7 +167,7 @@ async def wait_for_login(page) -> bool:
             except Exception:
                 pass
 
-        if attempt > 150:
+        if attempt > 300:
             return False
         await asyncio.sleep(2)
 
@@ -672,7 +677,7 @@ async def main():
     print("=" * 60, flush=True)
 
     async with async_playwright() as p:
-        headless = os.environ.get("HEADLESS", "true").lower() == "true"
+        headless = os.environ.get("HEADLESS", "false").lower() == "true"
         ctx = await p.chromium.launch_persistent_context(
             user_data_dir=SESSION_DIR,
             headless=headless,
