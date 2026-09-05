@@ -32,9 +32,15 @@ def init_flow_guard_db():
                 response_3_sent BOOLEAN DEFAULT 0,
                 is_completed BOOLEAN DEFAULT 0,
                 last_response VARCHAR(32),
+                post_help_sent BOOLEAN DEFAULT 0,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        # Ensure post_help_sent column exists in existing databases
+        try:
+            cur.execute("ALTER TABLE phone_flow_guard ADD COLUMN post_help_sent BOOLEAN DEFAULT 0")
+        except Exception:
+            pass
         conn.commit()
         conn.close()
     except Exception as e:
@@ -66,7 +72,7 @@ def get_phone_guard_state(phone_digits: str) -> Dict[str, Any]:
         db_path = os.path.join(settings.DATA_DIR, "whatsapp_production.db")
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
-        cur.execute("SELECT response_1_sent, response_2_sent, response_3_sent, is_completed, last_response FROM phone_flow_guard WHERE phone = ?", (phone_digits,))
+        cur.execute("SELECT response_1_sent, response_2_sent, response_3_sent, is_completed, last_response, COALESCE(post_help_sent, 0) FROM phone_flow_guard WHERE phone = ?", (phone_digits,))
         row = cur.fetchone()
         conn.close()
         if row:
@@ -75,7 +81,8 @@ def get_phone_guard_state(phone_digits: str) -> Dict[str, Any]:
                 "response_2_sent": bool(row[1]),
                 "response_3_sent": bool(row[2]),
                 "is_completed": bool(row[3]),
-                "last_response": row[4]
+                "last_response": row[4],
+                "post_help_sent": bool(row[5])
             }
     except Exception as e:
         logger.warning(f"[AGENT] Error reading phone_flow_guard: {e}")
@@ -84,7 +91,8 @@ def get_phone_guard_state(phone_digits: str) -> Dict[str, Any]:
         "response_2_sent": False,
         "response_3_sent": False,
         "is_completed": False,
-        "last_response": None
+        "last_response": None,
+        "post_help_sent": False
     }
 
 def update_phone_guard_state(phone_digits: str, sent_response: str):
@@ -96,18 +104,20 @@ def update_phone_guard_state(phone_digits: str, sent_response: str):
         r1 = 1 if sent_response == "RESPONSE_1" else 0
         r2 = 1 if sent_response == "RESPONSE_2" else 0
         r3 = 1 if sent_response == "RESPONSE_3" else 0
+        post_help = 1 if sent_response == "RESPONSE_POST_COMPLETION" else 0
 
         cur.execute('''
-            INSERT INTO phone_flow_guard (phone, response_1_sent, response_2_sent, response_3_sent, is_completed, last_response, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO phone_flow_guard (phone, response_1_sent, response_2_sent, response_3_sent, is_completed, last_response, post_help_sent, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(phone) DO UPDATE SET
                 response_1_sent = MAX(response_1_sent, excluded.response_1_sent),
                 response_2_sent = MAX(response_2_sent, excluded.response_2_sent),
                 response_3_sent = MAX(response_3_sent, excluded.response_3_sent),
                 is_completed = MAX(is_completed, excluded.is_completed),
+                post_help_sent = MAX(post_help_sent, excluded.post_help_sent),
                 last_response = excluded.last_response,
                 updated_at = CURRENT_TIMESTAMP
-        ''', (phone_digits, r1, r2, r3, 1 if is_comp else 0, sent_response))
+        ''', (phone_digits, r1, r2, r3, 1 if is_comp else 0, sent_response, post_help))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -160,23 +170,22 @@ def evaluate_customer_with_ai_agent(
     is_greeting = lower_text in ("hi", "hello", "hey", "namaste", "namaskar", "start", "info", "help", "hii", "helo")
     is_followup = is_conversational_followup(incoming_text)
 
-    # If customer sends an explicit greeting, ALWAYS reply with Welcome / Response 2
-    if is_greeting:
-        logger.info(f"[AGENT] Customer {phone} sent greeting ('{incoming_text}'). Replying with Response 2.")
-        update_phone_guard_state(phone_digits, "RESPONSE_2")
-        return AgentDecision(
-            action="REPLY",
-            response_type="RESPONSE_2",
-            reply_text=get_response_template("RESPONSE_2"),
-            reason=f"Customer greeting '{incoming_text}' received. Providing welcome and requirements prompt."
-        )
+    # 1. Post-Completion Check: If flow already completed, any message triggers ONE help message
+    if guard["is_completed"] or guard["response_1_sent"]:
+        if not guard.get("post_help_sent"):
+            logger.info(f"[AGENT] Customer {phone} flow already completed. Triggering one post-completion help message.")
+            update_phone_guard_state(phone_digits, "RESPONSE_POST_COMPLETION")
+            return AgentDecision(
+                action="REPLY",
+                response_type="RESPONSE_POST_COMPLETION",
+                reply_text=get_response_template("RESPONSE_POST_COMPLETION"),
+                reason="Flow completed. Customer sent message, triggering one post-completion help message."
+            )
+        else:
+            logger.info(f"[AGENT] Customer {phone} post-completion help already sent once. Silencing follow-up.")
+            return AgentDecision(action="SILENCE", reason="Post-completion help message already sent once.")
 
-    # 1. Check Persistent Guard State for Follow-up inquiries
-    if (guard["is_completed"] or guard["response_1_sent"]) and is_followup:
-        logger.info(f"[AGENT] Customer {phone} inquiry already COMPLETED. Follow-up inquiry ('{incoming_text}') silenced.")
-        return AgentDecision(action="SILENCE", reason="Conversation already completed with Response 1. Follow-up silenced.")
-
-    # 2. Fetch Live Chat History from WhatsApp Gateway
+    # 2. Fetch Live Chat History from WhatsApp Gateway if guard not marked completed
     raw_history = fetch_chat_history_from_gateway(phone, count=25)
     history_messages = list(reversed(raw_history)) if raw_history else []
 
@@ -193,11 +202,11 @@ def evaluate_customer_with_ai_agent(
         
         # Check outgoing
         if m_type == "outgoing":
-            if "Thank you for sharing your requirements" in text or "formal quotation" in text:
+            if "Thank you for sharing" in text or "formal quotation" in text:
                 past_r1_sent = True
             elif "Business / Company Name" in text or "To prepare your quotation" in text:
                 past_r3_sent = True
-            elif "Welcome to our Electrical Dealership" in text or "Please share your requirement details" in text:
+            elif "Welcome to our Electrical Dealership" in text or "Please share your requirement" in text:
                 past_r2_sent = True
         elif m_type == "incoming":
             msg_t = m.get("typeMessage", "")
@@ -210,14 +219,33 @@ def evaluate_customer_with_ai_agent(
     if incoming_text and (not all_incoming_texts or all_incoming_texts[-1] != incoming_text):
         all_incoming_texts.append(incoming_text)
 
-    # Check if Response 1 was found in WhatsApp history and incoming is follow-up or chatter
-    if past_r1_sent and is_followup:
+    # Check if Response 1 was found in WhatsApp history
+    if past_r1_sent:
         update_phone_guard_state(phone_digits, "RESPONSE_1")
-        logger.info(f"[AGENT] Response 1 found in live WhatsApp chat history for {phone}. Follow-up silenced.")
-        return AgentDecision(action="SILENCE", reason="Response 1 found in chat history. Follow-up silenced.")
+        if not guard.get("post_help_sent"):
+            logger.info(f"[AGENT] Response 1 found in live chat history for {phone}. Triggering one post-completion help message.")
+            update_phone_guard_state(phone_digits, "RESPONSE_POST_COMPLETION")
+            return AgentDecision(
+                action="REPLY",
+                response_type="RESPONSE_POST_COMPLETION",
+                reply_text=get_response_template("RESPONSE_POST_COMPLETION"),
+                reason="Response 1 found in chat history. Triggering one post-completion help message."
+            )
+        else:
+            return AgentDecision(action="SILENCE", reason="Flow completed and post-completion help message already sent.")
 
-    # 3. Check for Conversational Follow-up chatter
-    is_followup = is_conversational_followup(incoming_text)
+    # 3. New Customer Greeting (Before flow completed)
+    if is_greeting:
+        logger.info(f"[AGENT] New customer {phone} sent greeting ('{incoming_text}'). Replying with Response 2.")
+        update_phone_guard_state(phone_digits, "RESPONSE_2")
+        return AgentDecision(
+            action="REPLY",
+            response_type="RESPONSE_2",
+            reply_text=get_response_template("RESPONSE_2"),
+            reason=f"Customer greeting '{incoming_text}' received. Providing welcome and requirements prompt."
+        )
+
+    # 4. Check for Conversational Follow-up chatter after Response 3
     if is_followup and past_r3_sent:
         logger.info(f"[AGENT] Customer {phone} sent follow-up query after Response 3. Staying silent.")
         return AgentDecision(action="SILENCE", reason="Follow-up message after Response 3. No repeated prompt.")
@@ -254,7 +282,16 @@ def evaluate_customer_with_ai_agent(
                 extraction=extraction
             )
         else:
-            return AgentDecision(action="SILENCE", reason="Response 1 already sent.", extraction=extraction)
+            if not guard.get("post_help_sent"):
+                update_phone_guard_state(phone_digits, "RESPONSE_POST_COMPLETION")
+                return AgentDecision(
+                    action="REPLY",
+                    response_type="RESPONSE_POST_COMPLETION",
+                    reply_text=get_response_template("RESPONSE_POST_COMPLETION"),
+                    reason="Flow completed. Triggering post-completion help message.",
+                    extraction=extraction
+                )
+            return AgentDecision(action="SILENCE", reason="Response 1 and help message already sent.", extraction=extraction)
 
     # Scenario B: Requirements are present, but Business Details are missing
     elif has_products and not has_business_details:
