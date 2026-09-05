@@ -25,45 +25,33 @@ def format_in_phone(raw: str) -> str:
     return str(raw or "").strip()
 
 async def sync_customer_to_google_sheet_async(customer) -> bool:
-    """Asynchronously syncs customer record to Google Sheets via webhook."""
+    """Asynchronously syncs customer record to Google Sheets via webhook with 100% pure data."""
     webhook_url = settings.GOOGLE_SHEET_WEBHOOK_URL
     if not webhook_url:
         logger.debug("[GOOGLE SHEETS] GOOGLE_SHEET_WEBHOOK_URL not configured. Skipping cloud sheet sync.")
         return False
 
-    first_dt = customer.first_contact_at
-    if first_dt and hasattr(first_dt, "astimezone"):
-        first_str = first_dt.astimezone(IST).strftime("%Y-%m-%d")
-    else:
-        first_str = datetime.now(IST).strftime("%Y-%m-%d")
-
-    last_dt = customer.last_contact_at
-    if last_dt and hasattr(last_dt, "astimezone"):
-        last_str = last_dt.astimezone(IST).strftime("%Y-%m-%d")
-    else:
-        last_str = datetime.now(IST).strftime("%Y-%m-%d")
-
-    contact_name = customer.contact_person_name or customer.company_name or ""
-    if contact_name.lower() in ("customer", "none"):
-        contact_name = customer.company_name or ""
+    from app.exports.data_sanitizer import sanitize_customer_model
+    clean = sanitize_customer_model(customer)
 
     payload = {
-        "first_contact_date": first_str,
-        "last_contact_date": last_str,
-        "contact_person_name": contact_name,
-        "whatsapp_number": format_in_phone(customer.whatsapp_number),
-        "email_id": customer.email or "",
-        "company_name": customer.company_name or "",
-        "gst_number": customer.gst_number or "",
-        "complete_address": customer.complete_address or "",
-        "requirements_summary": customer.requirements_summary or ""
+        "first_contact_date": clean["first_contact_date"],
+        "last_contact_date": clean["last_contact_date"],
+        "contact_person_name": clean["contact_person_name"],
+        "whatsapp_number": clean["whatsapp_number"],
+        "email_id": clean["email_id"],
+        "company_name": clean["company_name"],
+        "gst_number": clean["gst_number"],
+        "complete_address": clean["complete_address"],
+        "requirements_summary": clean["requirements_summary"],
+        "requirements": clean["requirements_summary"]
     }
 
     try:
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
             res = await client.post(webhook_url, json=payload)
             if res.status_code == 200:
-                logger.info("[GOOGLE SHEETS] Successfully synced customer %s to cloud sheet!", customer.whatsapp_number)
+                logger.info("[GOOGLE SHEETS] Successfully synced customer %s to cloud sheet!", clean["whatsapp_number"])
                 return True
             else:
                 logger.warning("[GOOGLE SHEETS] Status %d: %s", res.status_code, res.text)
@@ -78,39 +66,27 @@ def sync_customer_to_google_sheet(customer) -> bool:
     if not webhook_url:
         return False
 
-    first_dt = customer.first_contact_at
-    if first_dt and hasattr(first_dt, "astimezone"):
-        first_str = first_dt.astimezone(IST).strftime("%Y-%m-%d")
-    else:
-        first_str = datetime.now(IST).strftime("%Y-%m-%d")
-
-    last_dt = customer.last_contact_at
-    if last_dt and hasattr(last_dt, "astimezone"):
-        last_str = last_dt.astimezone(IST).strftime("%Y-%m-%d")
-    else:
-        last_str = datetime.now(IST).strftime("%Y-%m-%d")
-
-    contact_name = customer.contact_person_name or customer.company_name or ""
-    if contact_name.lower() in ("customer", "none"):
-        contact_name = customer.company_name or ""
+    from app.exports.data_sanitizer import sanitize_customer_model
+    clean = sanitize_customer_model(customer)
 
     payload = {
-        "first_contact_date": first_str,
-        "last_contact_date": last_str,
-        "contact_person_name": contact_name,
-        "whatsapp_number": format_in_phone(customer.whatsapp_number),
-        "email_id": customer.email or "",
-        "company_name": customer.company_name or "",
-        "gst_number": customer.gst_number or "",
-        "complete_address": customer.complete_address or "",
-        "requirements_summary": customer.requirements_summary or ""
+        "first_contact_date": clean["first_contact_date"],
+        "last_contact_date": clean["last_contact_date"],
+        "contact_person_name": clean["contact_person_name"],
+        "whatsapp_number": clean["whatsapp_number"],
+        "email_id": clean["email_id"],
+        "company_name": clean["company_name"],
+        "gst_number": clean["gst_number"],
+        "complete_address": clean["complete_address"],
+        "requirements_summary": clean["requirements_summary"],
+        "requirements": clean["requirements_summary"]
     }
 
     try:
         with httpx.Client(timeout=10.0, follow_redirects=True) as client:
             res = client.post(webhook_url, json=payload)
             if res.status_code == 200:
-                logger.info("[GOOGLE SHEETS] Synced %s to Google Sheet", customer.whatsapp_number)
+                logger.info("[GOOGLE SHEETS] Synced %s to Google Sheet", clean["whatsapp_number"])
                 return True
     except Exception as e:
         logger.error("[GOOGLE SHEETS SYNC ERROR] %s", e)
