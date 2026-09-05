@@ -50,33 +50,47 @@ os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 # ─── 1. IMAGE & SCREENSHOT OCR ───────────────────────────────────────────────
 
 def run_image_ocr(image_path: str) -> str:
-    """Run native Windows OCR on an image/screenshot file and return extracted text."""
+    """Run native Windows OCR on Windows, or pytesseract on Linux/Cloud."""
     if not os.path.exists(image_path):
         return ""
 
-    cmd = [
-        "powershell",
-        "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
-        "-File", OCR_SCRIPT,
-        "-ImagePath", image_path,
-    ]
+    # 1. Try Windows Native OCR if on Windows
+    if sys.platform == "win32" and os.path.exists(OCR_SCRIPT):
+        cmd = [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", OCR_SCRIPT,
+            "-ImagePath", image_path,
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+            )
+            output = proc.stdout.strip()
+            if output:
+                lines = [line.strip() for line in output.splitlines() if line.strip()]
+                return "\n".join(lines)
+        except Exception as e:
+            print(f"[OCR WARNING] Windows native OCR: {e}")
 
+    # 2. Try pytesseract (Cross-platform / Linux / Docker)
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-        )
-        output = proc.stdout.strip()
-        lines = [line.strip() for line in output.splitlines() if line.strip()]
-        return "\n".join(lines)
+        import pytesseract
+        from PIL import Image
+        img = Image.open(image_path)
+        text = pytesseract.image_to_string(img)
+        if text.strip():
+            return text.strip()
     except Exception as e:
-        print(f"[OCR ERROR] Image OCR failed: {e}")
-        return ""
+        pass
+
+    return ""
 
 
 # ─── 2. PDF EXTRACTION ────────────────────────────────────────────────────────
