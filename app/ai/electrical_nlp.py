@@ -69,8 +69,8 @@ def extract_electrical_products(text: str) -> List[ProductItem]:
     
     for line in lines:
         lower = line.lower()
-        # Skip pure business lines
-        if any(h in lower for h in ("gst", "gstin", "email", "phone", "address", "company", "dear sir", "regards", "thank you")):
+        # Skip pure business lines and dealer slogans
+        if any(h in lower for h in ("gst", "gstin", "email", "phone", "address", "company", "dear sir", "regards", "thank you", "dealers in", "dealer of", "all kinds of", "stockist of", "authorized dealer", "distributor of")):
             continue
         
         matched_keyword = None
@@ -141,16 +141,30 @@ def extract_company_name(text: str) -> Optional[str]:
     if not text:
         return None
     
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+
     # 1. Explicit label has highest priority
-    for line in text.splitlines():
-        line_clean = line.strip()
+    for line_clean in lines:
         lower = line_clean.lower()
         if any(lower.startswith(prefix) for prefix in ("company:", "business:", "firm:", "shop:", "company name:", "firm name:", "m/s:", "m/s ")):
             clean = re.sub(r'^(?:company name|firm name|company|business|firm|shop|m/s)[\s:-]+', '', line_clean, flags=re.IGNORECASE).strip()
             if len(clean) >= 3 and len(clean) <= 60 and not any(p in clean.lower() for p in IGNORE_UI_PHRASES) and not is_noise_or_chatter(clean):
                 return clean.title()
 
-    # 2. Strong legal entity pattern
+    # 2. Visiting card / document header detection (Top 3 lines)
+    for l in lines[:3]:
+        lower_l = l.lower()
+        if any(tag in lower_l for tag in ("dealers in", "dealer of", "all kinds of", "stockist", "distributor", "authorized dealer", "authorised dealer", "manufacturers of")):
+            continue
+        if any(p in lower_l for p in IGNORE_UI_PHRASES) or is_noise_or_chatter(lower_l):
+            continue
+        # Check if line contains clear company entity marker
+        if any(ind in lower_l for ind in (" co.", " co", " company", "enterprises", "traders", "trading", "industries", "electricals", "electric", "pvt ltd", "ltd", "corporation", "hardware")):
+            clean = re.sub(r'^(?:m/s\.?|messrs\.?)\s*', '', l, flags=re.IGNORECASE).strip()
+            if len(clean) >= 3 and len(clean) <= 60:
+                return clean.title()
+
+    # 3. Strong legal entity pattern
     text_clean = re.sub(r'\bm/s\.?\s*', '', text, flags=re.IGNORECASE)
     legal_m = re.search(
         r'\b([A-Za-z0-9\s&().]{3,50}?\b(?:Private Limited|Pvt Ltd|Pvt\. Ltd\.|Limited|Ltd|Enterprises|Industries|Electricals|Electric|Traders|Corporation))\b',
@@ -160,10 +174,10 @@ def extract_company_name(text: str) -> Optional[str]:
     if legal_m:
         cand = legal_m.group(1).strip()
         cand_l = cand.lower()
-        if not any(p in cand_l for p in IGNORE_UI_PHRASES) and not is_noise_or_chatter(cand_l):
+        if not any(tag in cand_l for tag in ("dealers in", "dealer of", "all kinds of", "stockist", "distributor", "authorized dealer", "dealers")) and not any(p in cand_l for p in IGNORE_UI_PHRASES) and not is_noise_or_chatter(cand_l):
             return cand.title()
 
-    # 3. Pattern: from <Company> or at <Company>
+    # 4. Pattern: from <Company> or at <Company>
     from_m = re.search(
         r'\b(?:from|at)\s+([A-Za-z0-9\s&]{2,40}?(?:trading co|trading company|trading corp|electricals|electric|enterprises|traders|trading|industries|corp|corporation|agency|agencies|hardware|store|solutions|limited|ltd|pvt ltd|llp|co\.?))\b',
         text,
@@ -175,10 +189,11 @@ def extract_company_name(text: str) -> Optional[str]:
         if not any(p in cand_l for p in IGNORE_UI_PHRASES) and not is_noise_or_chatter(cand_l):
             return cand.title()
 
-    # 4. Line scan with strict indicator
-    for line in text.splitlines():
-        line_clean = line.strip()
+    # 5. Line scan with strict indicator
+    for line_clean in lines:
         lower = line_clean.lower()
+        if any(tag in lower for tag in ("dealers in", "dealer of", "all kinds of", "stockist", "distributor", "authorized dealer", "dealers")):
+            continue
         if any(p in lower for p in IGNORE_UI_PHRASES) or is_noise_or_chatter(lower):
             continue
         if "?" in line_clean:
@@ -216,9 +231,10 @@ def extract_address(text: str) -> Optional[str]:
     raw_lines = [s.strip() for s in text.splitlines() if s.strip()]
     lines = []
     for rl in raw_lines:
-        # Also split sentences if line contains multiple sentences
-        if ". " in rl:
-            lines.extend([part.strip() for part in rl.split(". ") if part.strip()])
+        # Avoid splitting common address abbreviations: 'No. ', 'Plot No. ', 'Shop No. ', 'Opp. '
+        safe_rl = re.sub(r'\b(no|plot|shop|flat|opp|rd|st|dr)\.\s+', r'\1_DOT_ ', rl, flags=re.IGNORECASE)
+        if ". " in safe_rl:
+            lines.extend([part.replace('_DOT_', '.').strip() for part in safe_rl.split(". ") if part.strip()])
         else:
             lines.append(rl)
     
@@ -249,7 +265,10 @@ def extract_address(text: str) -> Optional[str]:
         if is_explicit_label:
             clean = re.sub(r'^(?:address|location|loc|addr|shop address|office address|delivery address)[\s:-]+', '', line, flags=re.IGNORECASE).strip()
             if len(clean) >= 3 and "?" not in clean:
-                return clean
+                from app.exports.data_sanitizer import clean_address
+                cleaned_addr = clean_address(clean)
+                if cleaned_addr:
+                    return cleaned_addr
 
         # Legitimate address line: has pin code OR (has premise/street + city/state) OR (has city + state)
         if has_pin or (has_street and (has_city or has_state) and len(line) >= 8) or (has_city and has_state and len(line) >= 6):
@@ -260,28 +279,55 @@ def extract_address(text: str) -> Optional[str]:
                     matched_address_parts.append(clean_line)
 
     if matched_address_parts:
-        return ", ".join(matched_address_parts)
+        from app.exports.data_sanitizer import clean_address
+        return clean_address(", ".join(matched_address_parts))
     return None
 
 # ── 6. CONTACT PERSON NAME EXTRACTION ─────────────────────────────────────────
 def extract_contact_name(text: str, profile_name: Optional[str] = None) -> Optional[str]:
-    # Check if profile name is provided from WhatsApp profile and is a valid personal name
+    # 1. Visiting card / document designation pattern: Proprietor / Director / Owner / Partner
+    if text:
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        for i, l in enumerate(lines):
+            # Pattern A: "Proprietor: Kamal Yadav" or "Director - Kamal Yadav"
+            desig_m = re.match(r'^(?:proprietor|prop\.?|partner|director|owner|manager|founder|authorized signatory)[\s:-]+([A-Za-z\s]{2,30})$', l, re.IGNORECASE)
+            if desig_m:
+                cand = desig_m.group(1).strip()
+                if not is_noise_or_chatter(cand) and not any(p in cand.lower() for p in IGNORE_UI_PHRASES):
+                    return cand.title()
+            
+            # Pattern B: Line itself is "Proprietor" or "Owner", preceding or succeeding line is Name
+            if re.match(r'^(?:proprietor|prop\.?|partner|director|owner|manager|founder|authorized signatory)$', l, re.IGNORECASE):
+                if i > 0:
+                    prev_l = lines[i-1].strip()
+                    if re.match(r'^[A-Za-z\s.]{2,30}$', prev_l) and not any(k in prev_l.lower() for k in ('dealers', 'trading', 'company', 'ltd', 'gst', 'email', 'phone', 'address', 'goods', 'cables', 'wires', 'enterprises', 'industries', 'electricals', 'co.')):
+                        return prev_l.title()
+                if i < len(lines) - 1:
+                    next_l = lines[i+1].strip()
+                    if re.match(r'^[A-Za-z\s.]{2,30}$', next_l) and not any(k in next_l.lower() for k in ('dealers', 'trading', 'company', 'ltd', 'gst', 'email', 'phone', 'address', 'goods', 'cables', 'wires', 'enterprises', 'industries', 'electricals', 'co.')):
+                        return next_l.title()
+
+            # Pattern C: "Mr. Kamal Yadav", "Er. Kamal Yadav", "Shri Kamal Yadav"
+            title_m = re.search(r'\b(?:mr\.?|shri|er\.?|dr\.?)\s+([A-Za-z\s]{2,30})\b', l, re.IGNORECASE)
+            if title_m:
+                cand = title_m.group(1).strip()
+                if not is_noise_or_chatter(cand) and not any(p in cand.lower() for p in IGNORE_UI_PHRASES):
+                    return cand.title()
+
+        # Explicit pattern: I am <Name> from ... or My name is <Name> or Contact Person: <Name>
+        m = re.search(r'\b(?:my name is|i am|this is|contact person|contact person name|contact name)[\s:-]+([A-Za-z\s]{2,30})(?:\s+from|\s*,|\s*$|\s*\n)', text, re.IGNORECASE)
+        if m:
+            candidate = m.group(1).strip()
+            cand_l = candidate.lower()
+            if cand_l not in ("here", "interested", "need", "we", "hi", "sir") and not any(p in cand_l for p in IGNORE_UI_PHRASES) and not is_noise_or_chatter(cand_l):
+                return candidate.title()
+
+    # 2. Check if profile name is provided from WhatsApp profile and is a valid personal name
     if profile_name:
         clean_p = profile_name.strip()
         lower_p = clean_p.lower()
         if not any(p in lower_p for p in IGNORE_UI_PHRASES) and not is_noise_or_chatter(lower_p):
             if len(clean_p) >= 2 and len(clean_p) <= 30 and not clean_p.replace('+', '').replace(' ', '').isdigit():
                 return clean_p.title()
-
-    if not text:
-        return None
-    
-    # Explicit pattern: I am <Name> from ... or My name is <Name> or Contact Person: <Name>
-    m = re.search(r'\b(?:my name is|i am|this is|contact person|contact person name|contact name)[\s:-]+([A-Za-z\s]{2,30})(?:\s+from|\s*,|\s*$|\s*\n)', text, re.IGNORECASE)
-    if m:
-        candidate = m.group(1).strip()
-        cand_l = candidate.lower()
-        if cand_l not in ("here", "interested", "need", "we", "hi", "sir") and not any(p in cand_l for p in IGNORE_UI_PHRASES) and not is_noise_or_chatter(cand_l):
-            return candidate.title()
         
     return None
