@@ -139,9 +139,10 @@ def extract_company_name(text: str) -> Optional[str]:
                 return clean.title()
 
     # 2. Strong legal entity pattern (e.g. <Name> Private Limited / Pvt Ltd / Limited / Ltd / Enterprises / Industries)
+    text_clean = re.sub(r'\bm/s\.?\s*', '', text, flags=re.IGNORECASE)
     legal_m = re.search(
         r'\b([A-Za-z0-9\s&().]{3,50}?\b(?:Private Limited|Pvt Ltd|Pvt\. Ltd\.|Limited|Ltd|Enterprises|Industries|Electricals|Electric|Traders|Corporation))\b',
-        text,
+        text_clean,
         re.IGNORECASE
     )
     if legal_m:
