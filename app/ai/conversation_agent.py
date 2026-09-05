@@ -145,6 +145,7 @@ def evaluate_customer_with_ai_agent(
     incoming_text: str,
     has_media: bool = False,
     media_filename: str = "",
+    media_text: str = "",
     profile_name: str = ""
 ) -> AgentDecision:
     """
@@ -169,7 +170,7 @@ def evaluate_customer_with_ai_agent(
     past_r3_sent = guard["response_3_sent"]
 
     all_incoming_texts = []
-    has_any_media_in_history = has_media
+    has_any_media_in_history = has_media or bool(media_text)
 
     for m in history_messages:
         m_type = m.get("type", "")
@@ -206,8 +207,9 @@ def evaluate_customer_with_ai_agent(
         logger.info(f"[AGENT] Customer {phone} sent follow-up query after Response 3. Staying silent.")
         return AgentDecision(action="SILENCE", reason="Follow-up message after Response 3. No repeated prompt.")
 
-    # 4. Extract Cumulative Entities across ALL customer messages in history
-    extraction = analyze_conversation(all_incoming_texts, profile_name=profile_name)
+    # 4. Extract Cumulative Entities across ALL customer messages in history + documents/photos
+    att_list = [media_text] if media_text else None
+    extraction = analyze_conversation(all_incoming_texts, attachment_texts=att_list, profile_name=profile_name)
 
     # Check Requirements
     has_products = bool(extraction.product_requirements or extraction.raw_requirement_text or has_any_media_in_history)
