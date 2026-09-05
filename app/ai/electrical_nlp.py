@@ -153,7 +153,7 @@ def extract_company_name(text: str) -> Optional[str]:
 
     # 3. Pattern: from <Company> or at <Company>
     from_m = re.search(
-        r'\b(?:from|at)\s+([A-Za-z0-9\s&]{3,40}?(?:electricals|electric|enterprises|traders|trading|industries|corp|corporation|agency|agencies|hardware|store|solutions|limited|ltd|pvt ltd|llp))\b',
+        r'\b(?:from|at)\s+([A-Za-z0-9\s&]{2,40}?(?:trading co|trading company|trading corp|electricals|electric|enterprises|traders|trading|industries|corp|corporation|agency|agencies|hardware|store|solutions|limited|ltd|pvt ltd|llp|co\.?))\b',
         text,
         re.IGNORECASE
     )
@@ -183,14 +183,37 @@ def extract_company_name(text: str) -> Optional[str]:
 # ── 5. COMPLETE ADDRESS EXTRACTION ────────────────────────────────────────────
 PIN_CODE_REGEX = re.compile(r'\b[1-9][0-9]{5}\b')
 STREET_MARKERS = ("road", "rd", "street", "st", "lane", "gali", "marg", "bazaar", "bazar", "market", "floor", "nagar", "chowk", "complex", "sector", "plot", "park", "industrial area", "industrial areea", "building", "opp", "opposite", "near", "beside")
-CITY_MARKERS = ("kolkata", "delhi", "mumbai", "chennai", "bangalore", "hyderabad", "pune", "ahmedabad", "jaipur", "patna", "bengal", "burrabazar", "patliputra", "pirangut")
+CITY_MARKERS = (
+    "kolkata", "delhi", "mumbai", "chennai", "bangalore", "hyderabad", "pune", "ahmedabad", "jaipur", "patna",
+    "bengal", "burrabazar", "patliputra", "pirangut", "baddi", "solan", "gurgaon", "gurugram", "noida",
+    "greater noida", "faridabad", "ghaziabad", "surat", "vadodara", "rajkot", "indore", "bhopal", "nagpur",
+    "nashik", "ludhiana", "amritsar", "jalandhar", "panipat", "karnal", "chandigarh", "mohali", "panchkula",
+    "ranchi", "jamshedpur", "bhubaneswar", "cuttack", "guwahati", "raipur", "bilaspur", "kanpur", "lucknow", "agra"
+)
+STATE_MARKERS = (
+    "himachal pradesh", "himachal", "punjab", "haryana", "uttar pradesh", "uttarakhand", "rajasthan",
+    "gujarat", "maharashtra", "madhya pradesh", "west bengal", "bihar", "odisha", "jharkhand", "karnataka",
+    "tamil nadu", "kerala", "andhra pradesh", "telangana", "assam", "chhattisgarh", "goa"
+)
 
 def extract_address(text: str) -> Optional[str]:
     if not text:
         return None
     matched_address_parts = []
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    lines = [s.strip() for s in re.split(r'[\r\n.]+', text) if s.strip()]
     
+    # Check for 'from <Company> <Location>' pattern (e.g. 'I am kamal yadav from him Trading co Baddi Himachal Pradesh')
+    intro_loc_m = re.search(
+        r'\b(?:from|at)\s+(?:[A-Za-z0-9\s&]{2,40}?(?:trading co|trading company|trading corp|electricals|electric|enterprises|traders|trading|industries|corp|corporation|agency|agencies|hardware|store|solutions|limited|ltd|pvt ltd|llp|co\.?))\s+([A-Za-z\s,.-]{3,60})$',
+        text,
+        re.IGNORECASE
+    )
+    if intro_loc_m:
+        cand_loc = intro_loc_m.group(1).strip()
+        cand_l = cand_loc.lower()
+        if any(sm in cand_l for sm in STATE_MARKERS) or any(cm in cand_l for cm in CITY_MARKERS):
+            return cand_loc.title()
+
     for line in lines:
         lower = line.lower()
         # Reject questions, chat chatter, and UI noise immediately
@@ -200,24 +223,24 @@ def extract_address(text: str) -> Optional[str]:
         has_pin = bool(PIN_CODE_REGEX.search(line))
         has_street = any(sm in lower for sm in STREET_MARKERS)
         has_city = any(cm in lower for cm in CITY_MARKERS)
+        has_state = any(st in lower for st in STATE_MARKERS)
         is_explicit_label = any(lower.startswith(prefix) for prefix in ("address:", "loc:", "location:", "addr:", "shop address:", "office address:", "delivery address:"))
         
         if is_explicit_label:
             clean = re.sub(r'^(?:address|location|loc|addr|shop address|office address|delivery address)[\s:-]+', '', line, flags=re.IGNORECASE).strip()
-            if len(clean) >= 5 and "?" not in clean:
+            if len(clean) >= 3 and "?" not in clean:
                 return clean
 
-        # Legitimate address line: has pin code OR has premise marker + city marker
-        if has_pin or (has_street and has_city and len(line) >= 12):
+        # Legitimate address line: has pin code OR (has premise/street + city/state) OR (has city + state)
+        if has_pin or (has_street and (has_city or has_state) and len(line) >= 10) or (has_city and has_state and len(line) >= 8):
             # Exclude lines that are purely product orders or short chatter
             if not any(pk in lower for pk in ("bulb", "mcb", "wire", "cable", "fan", "switch", "watt", "pcs")):
                 clean_line = line.replace('\r', '').strip()
-                # If line is an intro like 'Hi, I am Debashis from Bengal Electricals, 12 Park St, Kolkata', isolate address
-                snippet_m = re.search(r'(\d+[\s\w,.-]+(?:st|street|road|rd|lane|nagar|park|bazar|market)[\s\w,.-]*(?:kolkata|delhi|mumbai|chennai|bangalore|pune|patna|bengal|pirangut)\b)', clean_line, re.IGNORECASE)
-                if snippet_m:
+                snippet_m = re.search(r'(\d+[\s\w,.-]+(?:st|street|road|rd|lane|nagar|park|bazar|market)[\s\w,.-]*(?:[A-Za-z\s]+)\b)', clean_line, re.IGNORECASE)
+                if snippet_m and (has_city or has_state):
                     clean_line = snippet_m.group(1).strip()
                 elif has_street and "," in clean_line:
-                    parts = [p.strip() for p in clean_line.split(",") if any(sm in p.lower() for sm in STREET_MARKERS) or any(cm in p.lower() for cm in CITY_MARKERS) or PIN_CODE_REGEX.search(p)]
+                    parts = [p.strip() for p in clean_line.split(",") if any(sm in p.lower() for sm in STREET_MARKERS) or any(cm in p.lower() for cm in CITY_MARKERS) or any(st in p.lower() for st in STATE_MARKERS) or PIN_CODE_REGEX.search(p)]
                     if parts:
                         clean_line = ", ".join(parts)
 
@@ -225,7 +248,6 @@ def extract_address(text: str) -> Optional[str]:
                     matched_address_parts.append(clean_line)
 
     if matched_address_parts:
-        # Return clean address without duplicate commas
         return ", ".join(matched_address_parts)
     return None
 
