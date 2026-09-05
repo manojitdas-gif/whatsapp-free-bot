@@ -290,9 +290,23 @@ async def process_incoming_cloud_message(info: Dict[str, Any]):
                 elif ext_summary.lower() not in customer.requirements_summary.lower():
                     customer.requirements_summary = f"{customer.requirements_summary}\n{ext_summary}"
 
-        if not customer.contact_person_name or customer.contact_person_name.lower() in ("customer", "none"):
-            if customer.company_name:
-                customer.contact_person_name = customer.company_name
+        from app.exports.data_sanitizer import (
+            clean_contact_name,
+            clean_company_name,
+            clean_address,
+            clean_gst_number,
+            clean_email,
+            clean_requirements_summary,
+            clean_phone_number
+        )
+
+        customer.company_name = clean_company_name(customer.company_name)
+        customer.contact_person_name = clean_contact_name(customer.contact_person_name, company=customer.company_name)
+        customer.complete_address = clean_address(customer.complete_address)
+        customer.gst_number = clean_gst_number(customer.gst_number)
+        customer.email = clean_email(customer.email)
+        customer.requirements_summary = clean_requirements_summary(customer.requirements_summary)
+        customer.whatsapp_number = clean_phone_number(customer.whatsapp_number)
 
         db.commit()
 
