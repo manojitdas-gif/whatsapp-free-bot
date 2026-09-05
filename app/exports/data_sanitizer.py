@@ -124,10 +124,13 @@ def clean_email(raw_email: Optional[str]) -> str:
 
 
 def clean_company_name(raw_company: Optional[str]) -> str:
-    """Cleans company name, stripping M/s prefixes, dealer taglines, and noise."""
+    """Cleans company name, stripping M/s prefixes, conversational intros, dealer taglines, and noise."""
     if not raw_company:
         return ""
     clean = str(raw_company).strip()
+
+    # Strip conversational introductions: "Hi, I am Raj from ABC Electricals" -> "ABC Electricals"
+    clean = re.sub(r'^(?:hi|hello|hey|namaste)?[,\s]*(?:i\s*am|this\s*is|my\s*name\s*is)?\s*[A-Za-z\s]+?\s+from\s+', '', clean, flags=re.IGNORECASE).strip()
 
     # Strip prefixes: M/s, M/S, Messrs, Company:, Firm:, Shop Name:
     clean = re.sub(r'^(?:m/s\.?|messrs\.?|company(?:\s+name)?|firm(?:\s+name)?|shop(?:\s+name)?|business)[\s:-]+', '', clean, flags=re.IGNORECASE).strip()
@@ -173,7 +176,8 @@ def clean_address(raw_address: Optional[str]) -> str:
     - Strips out leaked email addresses
     - Strips out leaked phone numbers
     - Strips out labels (GST:, Email:, Ph:, Address:)
-    - Strips out conversational chatter
+    - Strips out company header prefixes (e.g. 'M/s Gupta Electricals, 12 Park Street...')
+    - Strips out conversational chatter ('Our shop is...', 'I am from...')
     """
     if not raw_address:
         return ""
@@ -192,14 +196,23 @@ def clean_address(raw_address: Optional[str]) -> str:
     # 4. Remove labels like GSTIN:, Email:, Phone:, Address:, Loc:
     addr = re.sub(r'\b(?:gstin|gst|email|e-mail|mail|phone|ph|mob|mobile|address|addr|loc|location)\b[\s:-]*', '', addr, flags=re.IGNORECASE)
     
-    # 5. Remove conversational chatter
+    # 5. Remove conversational intros from address: "Hi, I am X from Y Electricals, 12 Park St..."
+    addr = re.sub(r'^(?:hi|hello|hey|namaste)?[,\s]*(?:i\s*am|this\s*is|my\s*name\s*is)?\s*[A-Za-z\s]+?\s+from\s+[A-Za-z0-9\s&.]+,?\s*', '', addr, flags=re.IGNORECASE).strip()
+    
+    # 6. Remove premise introductions: "Our shop is 12 MG Road...", "Office is at..."
+    addr = re.sub(r'^(?:our\s+(?:shop|office|godown|factory|firm|company|unit)(?:\s+is|\s+at)?|shop\s+is|office\s+is)[\s:-]*', '', addr, flags=re.IGNORECASE).strip()
+
+    # 7. Remove company names preceding the address: "M/s Gupta Electricals, 12 Park Street..."
+    addr = re.sub(r'^(?:m/s\.?|messrs\.?)\s*[A-Za-z0-9\s&.]+(?:electricals|electric|enterprises|traders|trading|industries|corp|corporation|hardware|store|solutions|limited|ltd|pvt ltd|llp|co\.?),?\s*', '', addr, flags=re.IGNORECASE).strip()
+
+    # 8. Remove conversational chatter
     for phrase in CHATTER_PHRASES:
         addr = re.sub(re.escape(phrase), '', addr, flags=re.IGNORECASE)
     
-    # 6. Clean up punctuation artifacts (",,", " , ", trailing commas, semicolons)
+    # 9. Clean up punctuation artifacts (",,", " , ", trailing commas, semicolons)
     addr = re.sub(r'[,;\s]+,', ',', addr)
     addr = re.sub(r'\s{2,}', ' ', addr)
-    addr = addr.strip(' ,;:-')
+    addr = addr.strip(' ,;:-.')
     
     if len(addr) < 4:
         return ""
