@@ -27,10 +27,13 @@ RESPONSE_3 = (
     "👤 Contact Person Name"
 )
 
+RESPONSE_POST_COMPLETION = "Hi! How can we help you? 😊"
+
 def get_response_template(response_type: str) -> str:
     mapping = {
         "RESPONSE_1": RESPONSE_1,
         "RESPONSE_2": RESPONSE_2,
         "RESPONSE_3": RESPONSE_3,
+        "RESPONSE_POST_COMPLETION": RESPONSE_POST_COMPLETION,
     }
     return mapping.get(response_type, RESPONSE_2)
