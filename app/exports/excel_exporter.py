@@ -183,7 +183,18 @@ def _write_to_workbook(file_path: str, customer) -> None:
             if is_alt:
                 cell.fill = ALT_FILL
             cell.alignment = align_c if col_idx in (1, 2, 4, 7) else align_l
+            # Force phone column to plain text so '+91...' is never parsed as a formula
+            if col_idx == 4:
+                cell.number_format = "@"
+                cell.data_type = "s"
         ws.row_dimensions[new_row].height = 28
+
+    # Always re-enforce plain-text format on entire phone column (Col 4) to prevent #ERROR!
+    for r in range(2, ws.max_row + 1):
+        phone_cell = ws.cell(row=r, column=4)
+        phone_cell.number_format = "@"
+        if phone_cell.value and str(phone_cell.value).startswith("+"):
+            phone_cell.data_type = "s"
 
     wb.save(file_path)
 
