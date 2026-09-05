@@ -60,7 +60,7 @@ function doPost(e) {
     var rowData = [
       data.first_contact_date || Utilities.formatDate(new Date(), "Asia/Kolkata", "yyyy-MM-dd"),
       data.last_contact_date || Utilities.formatDate(new Date(), "Asia/Kolkata", "yyyy-MM-dd"),
-      data.contact_person_name || data.company_name || "",
+      data.contact_person_name || "",
       phoneText,
       data.email_id || "",
       data.company_name || "",
