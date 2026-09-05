@@ -25,6 +25,7 @@ from app.exports.excel_exporter import sync_customer_to_excel
 from app.exports.google_sheets_sync import sync_customer_to_google_sheet_async
 from app.whatsapp import get_whatsapp_provider
 from document_analyzer import analyze_file, parse_product_details
+from app.ai.conversation_agent import evaluate_customer_with_ai_agent
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhook", tags=["Cloud Gateway Webhook"])
@@ -258,12 +259,58 @@ async def process_incoming_cloud_message(info: Dict[str, Any]):
             pass
         await sync_customer_to_google_sheet_async(customer)
 
-        # ── IF COMPLETED: REMAIN SILENT ───────────────────────────────────────
-        if is_completed:
-            logger.info("[CLOUD BOT] Customer %s inquiry already completed. Staying silent.", phone)
+        # ── AI AGENT CONVERSATION ANALYSIS & DECISION ──────────────────────────
+        agent_decision = evaluate_customer_with_ai_agent(
+            phone=phone,
+            incoming_text=text,
+            has_media=bool(media_url or file_name or customer.requirements_summary),
+            media_filename=file_name,
+            profile_name=name
+        )
+
+        # Merge any newly extracted entities from full history into customer
+        if agent_decision.extraction:
+            ext = agent_decision.extraction
+            if ext.company_business_name and (not customer.company_name or len(ext.company_business_name) > len(customer.company_name)):
+                customer.company_name = ext.company_business_name
+            if ext.contact_person_name and (not customer.contact_person_name or customer.contact_person_name.lower() in ("customer", "none")):
+                customer.contact_person_name = ext.contact_person_name
+            if ext.complete_address and (not customer.complete_address or len(ext.complete_address) > len(customer.complete_address)):
+                customer.complete_address = ext.complete_address
+            if ext.gst_number and not customer.gst_number:
+                customer.gst_number = ext.gst_number
+            if ext.email_id and not customer.email:
+                customer.email = ext.email_id
+            
+            ext_summary = ext.format_requirements_summary()
+            if ext_summary:
+                if not customer.requirements_summary or customer.requirements_summary in ("[Product Photo Attached]", "[Product Photo / Document Attached]"):
+                    customer.requirements_summary = ext_summary
+                elif ext_summary.lower() not in customer.requirements_summary.lower():
+                    customer.requirements_summary = f"{customer.requirements_summary}\n{ext_summary}"
+
+        if not customer.contact_person_name or customer.contact_person_name.lower() in ("customer", "none"):
+            if customer.company_name:
+                customer.contact_person_name = customer.company_name
+
+        db.commit()
+
+        # Synchronize updated details to Google Sheets and Excel
+        await sync_customer_to_google_sheet_async(customer)
+        try:
+            sync_customer_to_excel(customer)
+        except Exception:
+            pass
+
+        # ── ENFORCE AGENT DECISION ───────────────────────────────────────────
+        if agent_decision.action == "SILENCE":
+            logger.info("[CLOUD BOT] AI Agent Decision for %s: SILENCE. Reason: %s", phone, agent_decision.reason)
             return
 
-        # Fetch latest conversation to check stage
+        response_type = agent_decision.response_type
+        reply_text = agent_decision.reply_text
+
+        # Fetch latest conversation to check/update stage
         conv = db.query(Conversation).filter(Conversation.customer_id == customer.id).order_by(Conversation.id.desc()).first()
         if not conv:
             conv = Conversation(
@@ -275,45 +322,12 @@ async def process_incoming_cloud_message(info: Dict[str, Any]):
             db.commit()
             db.refresh(conv)
 
-        # Decision Engine
-        clean_msg = text.lower().strip()
-        clean_alpha = re.sub(r'[^a-zA-Z\s]', '', clean_msg).strip()
-        is_greeting = (clean_msg in GREETING_WORDS) or (clean_alpha in GREETING_WORDS)
-
-        if is_greeting:
-            response_type = "RESPONSE_2"
-        else:
-            cumul = ExtractionResult(
-                contact_person_name=customer.contact_person_name,
-                email_id=customer.email,
-                company_business_name=customer.company_name,
-                gst_number=customer.gst_number,
-                complete_address=customer.complete_address,
-                product_requirements=extraction.product_requirements,
-                raw_requirement_text=customer.requirements_summary
-            )
-            has_media = bool(media_url or customer.requirements_summary)
-            response_type, _ = evaluate_conversation_completeness(cumul, has_media=has_media)
-
-        # Single-Reply Enforcement: Never send identical reply stage twice
-        last_sent = _last_sent_response.get(phone_digits)
-        if (last_sent == response_type) or (
-            response_type == "RESPONSE_3" and conv.stage == ConversationStage.WAITING_FOR_CUSTOMER_DETAILS.value
-        ) or (
-            response_type == "RESPONSE_2" and conv.stage == ConversationStage.WAITING_FOR_PRODUCT_REQUIREMENTS.value
-        ) or (
-            response_type == "RESPONSE_1" and conv.stage == ConversationStage.COMPLETED.value
-        ):
-            logger.info("[CLOUD BOT] Skipping repeated reply %s for %s", response_type, phone)
-            return
-
         # Send Reply via Gateway
-        reply_text = get_response_template(response_type)
         provider = get_whatsapp_provider()
         sent = await provider.send_text_message(phone, reply_text)
         if sent:
             _last_sent_response[phone_digits] = response_type
-            logger.info("[CLOUD BOT] Sent %s to %s", response_type, phone)
+            logger.info("[CLOUD BOT] Sent %s to %s. Reason: %s", response_type, phone, agent_decision.reason)
 
         # Stage Transition
         if response_type == "RESPONSE_1":
