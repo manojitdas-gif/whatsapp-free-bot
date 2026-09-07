@@ -40,10 +40,15 @@ class Settings(BaseSettings):
     REQUIRE_GST_MANDATORY: bool = False  # If True, GST is strictly mandatory unless explicitly "Not Applicable"
 
     # Cloud WhatsApp-Compatible Gateway Settings (Green API / Baileys Gateway)
-    GATEWAY_TYPE: str = "green_api"  # "green_api", "evolution", or "local_web"
+    GATEWAY_TYPE: str = os.getenv("GATEWAY_TYPE", "evolution_api")
     GATEWAY_INSTANCE_ID: Optional[str] = os.getenv("GATEWAY_INSTANCE_ID", "710522726064")
     GATEWAY_API_TOKEN: Optional[str] = os.getenv("GATEWAY_API_TOKEN", "52d9555e5c6b4c65b3ebc1119abb5e62bf64e52d8dde4ac7aa")
     GATEWAY_API_URL: str = os.getenv("GATEWAY_API_URL", "https://api.green-api.com")
+
+    # Evolution API Settings (100% Free Open-Source Cloud Gateway)
+    EVOLUTION_API_URL: str = os.getenv("EVOLUTION_API_URL", "https://whatsapp-gateway-nsr1.onrender.com")
+    EVOLUTION_API_KEY: str = os.getenv("EVOLUTION_API_KEY", "mysecretkey123")
+    EVOLUTION_INSTANCE_NAME: str = os.getenv("EVOLUTION_INSTANCE_NAME", "whatsapp-bot")
 
     # Cloud Google Sheets Sync URL (Google Apps Script Webhook)
     GOOGLE_SHEET_WEBHOOK_URL: Optional[str] = os.getenv(
