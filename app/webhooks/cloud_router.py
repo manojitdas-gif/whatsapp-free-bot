@@ -97,6 +97,30 @@ def extract_message_info(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 "type": type_msg
             }
 
+def unwrap_evolution_message(msg_obj: dict) -> tuple[dict, str]:
+    if not isinstance(msg_obj, dict):
+        return {}, "text"
+    if "ephemeralMessage" in msg_obj:
+        msg_obj = msg_obj["ephemeralMessage"].get("message", {}) or {}
+    if "viewOnceMessage" in msg_obj:
+        msg_obj = msg_obj["viewOnceMessage"].get("message", {}) or {}
+    if "viewOnceMessageV2" in msg_obj:
+        msg_obj = msg_obj["viewOnceMessageV2"].get("message", {}) or {}
+    if "documentWithCaptionMessage" in msg_obj:
+        msg_obj = msg_obj["documentWithCaptionMessage"].get("message", {}) or {}
+
+    if "imageMessage" in msg_obj:
+        return msg_obj["imageMessage"], "imageMessage"
+    elif "documentMessage" in msg_obj:
+        return msg_obj["documentMessage"], "documentMessage"
+    elif "videoMessage" in msg_obj:
+        return msg_obj["videoMessage"], "videoMessage"
+    elif "audioMessage" in msg_obj:
+        return msg_obj["audioMessage"], "audioMessage"
+    elif "extendedTextMessage" in msg_obj:
+        return msg_obj["extendedTextMessage"], "extendedTextMessage"
+    return msg_obj, "text"
+
     # 2. Evolution API / Baileys generic format
     event = payload.get("event", "")
     data = payload.get("data", {}) or payload
@@ -113,20 +137,43 @@ def extract_message_info(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         clean_phone = re.sub(r'[^0-9]', '', remote_jid)
         if not clean_phone:
             return None
-        msg_obj = data.get("message", {}) or {}
-        text = (
-            msg_obj.get("conversation") or
-            msg_obj.get("extendedTextMessage", {}).get("text") or
-            msg_obj.get("imageMessage", {}).get("caption") or
-            msg_obj.get("documentMessage", {}).get("caption") or ""
-        )
+
+        raw_msg = data.get("message", {}) or {}
+        inner_msg, msg_type = unwrap_evolution_message(raw_msg)
+
+        text = ""
+        file_name = ""
+        media_url = ""
+        base64_data = data.get("base64") or (inner_msg.get("base64") if isinstance(inner_msg, dict) else "") or ""
+        key_id = key.get("id", "msg")
+
+        if msg_type == "imageMessage":
+            text = inner_msg.get("caption", "") or "[Product Photo Attached]"
+            file_name = f"image_{key_id}.jpg"
+            media_url = inner_msg.get("url", "")
+        elif msg_type == "documentMessage":
+            fn = inner_msg.get("fileName") or inner_msg.get("title") or f"doc_{key_id}.pdf"
+            file_name = fn
+            text = inner_msg.get("caption", "") or f"[Document: {fn}]"
+            media_url = inner_msg.get("url", "")
+        elif msg_type == "extendedTextMessage":
+            text = inner_msg.get("text", "")
+        else:
+            text = (
+                raw_msg.get("conversation") or
+                inner_msg.get("text") or
+                inner_msg.get("caption") or ""
+            )
+
         return {
             "phone": clean_phone,
             "name": data.get("pushName", ""),
             "text": text.strip(),
-            "media_url": "",
-            "file_name": "",
-            "type": "text"
+            "media_url": media_url,
+            "file_name": file_name,
+            "type": msg_type,
+            "raw_data": data,
+            "base64_data": base64_data
         }
 
     # 3. Direct JSON test payload: {"phone": "...", "text": "...", "name": "..."}
@@ -186,20 +233,7 @@ async def process_incoming_cloud_message(info: Dict[str, Any]):
             db.commit()
             db.refresh(conv)
 
-        # ── SAVE INCOMING CUSTOMER MESSAGE IN BACKEND DATABASE ───────────────
-        inbound_msg = Message(
-            conversation_id=conv.id,
-            direction="INBOUND",
-            message_type=info.get("type", "text"),
-            text=text or (f"[Document: {file_name}]" if file_name else "[Media Attachment]"),
-            media_reference=media_url or file_name or None,
-            processing_status="PROCESSED",
-            timestamp=utc_now()
-        )
-        db.add(inbound_msg)
-        db.commit()
-
-        # Track completed phones in-memory for quick reference (AI agent makes the actual decision)
+        # Track completed phones in-memory for quick reference
         comp_conv = db.query(Conversation).filter(
             Conversation.customer_id == customer.id,
             (Conversation.status == ConversationStatus.COMPLETED.value) |
@@ -210,28 +244,95 @@ async def process_incoming_cloud_message(info: Dict[str, Any]):
         else:
             _completed_phones.discard(phone_digits)
 
-        # Handle Document / Photo download if URL provided
+        # ── DOWNLOAD & ANALYZE ATTACHED MEDIA/DOCUMENTS ───────────────────────
         ocr_text = ""
         extracted_doc_summary = ""
-        if media_url:
+        raw_doc_text = ""
+        is_media_message = bool(file_name or media_url or info.get("type") in ("imageMessage", "documentMessage", "image", "document") or info.get("base64_data"))
+        local_file = ""
+
+        if is_media_message:
             save_dir = os.path.join(settings.DATA_DIR, "customer_files")
             os.makedirs(save_dir, exist_ok=True)
-            ext = os.path.splitext(file_name)[1] if file_name else ".pdf"
-            local_file = os.path.join(save_dir, f"{phone}_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}_{file_name or 'file' + ext}")
+            safe_name = re.sub(r'[^a-zA-Z0-9_.-]', '_', file_name or "attachment.pdf")
+            local_file = os.path.join(save_dir, f"{phone_digits}_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}_{safe_name}")
+
             provider = get_whatsapp_provider()
-            downloaded = await provider.download_media(media_url, local_file)
-            if downloaded:
+            downloaded = False
+
+            # 1. Try base64 directly if present
+            if info.get("base64_data"):
+                downloaded = await provider.download_media(info["base64_data"], local_file)
+
+            # 2. Try Evolution API getBase64FromMediaMessage if raw_data is available
+            if not downloaded and info.get("raw_data") and hasattr(provider, "download_media_from_message"):
+                downloaded = await provider.download_media_from_message(info["raw_data"], local_file)
+
+            # 3. Try standard media_url if available
+            if not downloaded and media_url:
+                downloaded = await provider.download_media(media_url, local_file)
+
+            if downloaded and os.path.exists(local_file):
+                logger.info("[CLOUD BOT] Successfully saved customer document: %s (%d bytes)", local_file, os.path.getsize(local_file))
                 doc_sum, doc_raw = analyze_file(local_file)
                 if doc_raw:
                     ocr_text = doc_raw
+                    raw_doc_text = doc_raw
                 if doc_sum:
                     extracted_doc_summary = doc_sum
 
-        # Extract details using electrical NLP
-        att_texts = [ocr_text] if ocr_text else None
+        # Save incoming customer message with document details if present
+        saved_text = text
+        if extracted_doc_summary:
+            saved_text = f"{text}\n{extracted_doc_summary}" if text and text != extracted_doc_summary else extracted_doc_summary
+        elif is_media_message and not text:
+            saved_text = f"[Document: {file_name}]" if file_name else "[Media Attachment]"
+
+        inbound_msg = Message(
+            conversation_id=conv.id,
+            direction="INBOUND",
+            message_type=info.get("type", "text"),
+            text=saved_text,
+            media_reference=local_file if (local_file and os.path.exists(local_file)) else (file_name or media_url or None),
+            processing_status="PROCESSED",
+            timestamp=utc_now()
+        )
+        db.add(inbound_msg)
+        db.commit()
+
+        # ── CUMULATIVE MULTI-TURN DOCUMENT & CHAT EXTRACTION ────────────────
+        past_inbound_texts = []
+        past_attachment_texts = []
+
+        if raw_doc_text:
+            past_attachment_texts.append(raw_doc_text)
+
+        all_convs = db.query(Conversation).filter(Conversation.customer_id == customer.id).all()
+        for c in all_convs:
+            msgs = db.query(Message).filter(Message.conversation_id == c.id).order_by(Message.id.asc()).all()
+            for m in msgs:
+                if m.direction == "INBOUND" and m.text and not m.text.startswith("["):
+                    past_inbound_texts.append(m.text)
+
+        # Retrieve all previous documents from data/customer_files for this customer
+        save_dir = os.path.join(settings.DATA_DIR, "customer_files")
+        if os.path.exists(save_dir):
+            for fname in os.listdir(save_dir):
+                if fname.startswith(f"{phone_digits}_"):
+                    fpath = os.path.join(save_dir, fname)
+                    try:
+                        _, prev_raw = analyze_file(fpath)
+                        if prev_raw and prev_raw not in past_attachment_texts:
+                            past_attachment_texts.append(prev_raw)
+                    except Exception:
+                        pass
+
+        if text and text not in past_inbound_texts:
+            past_inbound_texts.append(text)
+
         extraction = analyze_conversation(
-            messages_history=[text] if text else [],
-            attachment_texts=att_texts,
+            messages_history=past_inbound_texts,
+            attachment_texts=past_attachment_texts if past_attachment_texts else None,
             profile_name=name
         )
 
@@ -289,10 +390,15 @@ async def process_incoming_cloud_message(info: Dict[str, Any]):
         agent_decision = evaluate_customer_with_ai_agent(
             phone=phone,
             incoming_text=text,
-            has_media=bool(media_url or file_name or customer.requirements_summary),
+            has_media=bool(is_media_message or customer.requirements_summary or extracted_doc_summary),
             media_filename=file_name,
             media_text=ocr_text,
-            profile_name=name
+            profile_name=name,
+            existing_requirements=customer.requirements_summary or "",
+            existing_company=customer.company_name or "",
+            existing_address=customer.complete_address or "",
+            existing_contact=customer.contact_person_name or "",
+            existing_gst=customer.gst_number or ""
         )
 
         # Merge any newly extracted entities from full history into customer
