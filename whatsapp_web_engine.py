@@ -55,6 +55,7 @@ REPLY_WAIT_S = 1.0
 _last_processed_id: dict = {}
 _last_sent_response: dict = {}
 _completed_phones: set = set()
+_post_help_sent_phones: set = set()
 
 GREETING_WORDS = {
     "hi", "hello", "hey", "hlo", "hii", "helo", "namaste", "namaskar",
@@ -555,11 +556,6 @@ async def process_active_chat(page) -> None:
             elif new_req.lower() not in customer.requirements_summary.lower():
                 customer.requirements_summary = f"{customer.requirements_summary}\n{new_req}"
 
-        # Apply rule: Contact person fallback to Company Name
-        if not customer.contact_person_name or customer.contact_person_name.lower() in ("customer", "none", ""):
-            if customer.company_name:
-                customer.contact_person_name = customer.company_name
-
         customer.last_contact_at = utc_now()
         db.commit()
 
@@ -567,10 +563,18 @@ async def process_active_chat(page) -> None:
         sync_customer_to_excel(customer)
         print(f"         📊 Synced {phone} to 9-column Excel & Database in-place!", flush=True)
 
-        # ── IF ALREADY COMPLETED: SILENT IN-PLACE UPDATE, DO NOT REPLY FURTHER ────
+        # ── IF ALREADY COMPLETED: SEND ONE POST-COMPLETION HELP MESSAGE, THEN SILENT ────
         if is_already_completed:
-            print(f"         ✓ In-place updated requirements in Excel for {phone}. No further reply generated (Conversation Completed).", flush=True)
-            return
+            if phone_digits not in _post_help_sent_phones:
+                _post_help_sent_phones.add(phone_digits)
+                reply_text = get_response_template("RESPONSE_POST_COMPLETION")
+                await asyncio.sleep(REPLY_WAIT_S)
+                await send_reply(page, reply_text)
+                print(f"         👋 Sent single post-completion help message to {phone}!", flush=True)
+                return
+            else:
+                print(f"         ✓ In-place updated requirements in Excel for {phone}. Silent (Help already sent).", flush=True)
+                return
 
         # Fetch active or latest conversation record to check previous stage
         conv = (
