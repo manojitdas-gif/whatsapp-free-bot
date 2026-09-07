@@ -167,6 +167,31 @@ async def process_incoming_cloud_message(info: Dict[str, Any]):
             if name and (not customer.contact_person_name or customer.contact_person_name.lower() in ("customer", "none")):
                 customer.contact_person_name = name
 
+        # Ensure active conversation exists
+        conv = db.query(Conversation).filter(Conversation.customer_id == customer.id).order_by(Conversation.id.desc()).first()
+        if not conv:
+            conv = Conversation(
+                customer_id=customer.id,
+                stage=ConversationStage.NEW.value,
+                status=ConversationStatus.ACTIVE.value
+            )
+            db.add(conv)
+            db.commit()
+            db.refresh(conv)
+
+        # ── SAVE INCOMING CUSTOMER MESSAGE IN BACKEND DATABASE ───────────────
+        inbound_msg = Message(
+            conversation_id=conv.id,
+            direction="INBOUND",
+            message_type=info.get("type", "text"),
+            text=text or (f"[Document: {file_name}]" if file_name else "[Media Attachment]"),
+            media_reference=media_url or file_name or None,
+            processing_status="PROCESSED",
+            timestamp=utc_now()
+        )
+        db.add(inbound_msg)
+        db.commit()
+
         # Track completed phones in-memory for quick reference (AI agent makes the actual decision)
         comp_conv = db.query(Conversation).filter(
             Conversation.customer_id == customer.id,
@@ -336,7 +361,27 @@ async def process_incoming_cloud_message(info: Dict[str, Any]):
         sent = await provider.send_text_message(phone, reply_text)
         if sent:
             _last_sent_response[phone_digits] = response_type
-            logger.info("[CLOUD BOT] Sent %s to %s. Reason: %s", response_type, phone, agent_decision.reason)
+            # ── SAVE OUTGOING BOT REPLY IN BACKEND DATABASE ──────────────────
+            outbound_msg = Message(
+                conversation_id=conv.id,
+                direction="OUTBOUND",
+                message_type="text",
+                text=reply_text,
+                processing_status="PROCESSED",
+                timestamp=utc_now()
+            )
+            db.add(outbound_msg)
+
+            resp_log = ResponseLog(
+                conversation_id=conv.id,
+                response_type=response_type,
+                message_text=reply_text,
+                status="SENT",
+                sent_at=utc_now()
+            )
+            db.add(resp_log)
+            db.commit()
+            logger.info("[CLOUD BOT] Sent %s to %s and recorded in backend DB. Reason: %s", response_type, phone, agent_decision.reason)
 
         # Stage Transition
         if response_type in ("RESPONSE_1", "RESPONSE_POST_COMPLETION"):
