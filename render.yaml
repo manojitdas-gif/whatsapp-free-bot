@@ -8,15 +8,15 @@ services:
       - key: ENVIRONMENT
         value: production
       - key: WHATSAPP_PROVIDER
-        value: green_api
+        value: evolution_api
       - key: GATEWAY_TYPE
-        value: green_api
-      - key: GATEWAY_INSTANCE_ID
-        value: "710522726064"
-      - key: GATEWAY_API_TOKEN
-        value: "52d9555e5c6b4c65b3ebc1119abb5e62bf64e52d8dde4ac7aa"
-      - key: GATEWAY_API_URL
-        value: "https://api.green-api.com"
+        value: evolution_api
+      - key: EVOLUTION_API_URL
+        value: "https://whatsapp-gateway-nsr1.onrender.com"
+      - key: EVOLUTION_API_KEY
+        value: "mysecretkey123"
+      - key: EVOLUTION_INSTANCE_NAME
+        value: "whatsapp-bot"
       - key: GOOGLE_SHEET_WEBHOOK_URL
         value: "https://script.google.com/macros/s/AKfycby-a2A6tpShmCJjeOVZ-dkNf2POJFiozd6Lz5cC6Krtsbv1qUgVUKq2eKir_DRnrf592A/exec"
       - key: TIMEZONE
