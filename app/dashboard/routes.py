@@ -9,7 +9,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 from app.database.session import get_db
 from app.database.models import Customer, Conversation, Message
-from app.exports.excel_exporter import HEADERS, format_ist_timestamp, format_phone_display
+from app.exports.excel_exporter import HEADERS, format_ist_timestamp, format_phone_display, _write_to_workbook, _excel_lock
 from app.config import settings
 
 router = APIRouter(prefix="", tags=["Dashboard"])
@@ -53,16 +53,30 @@ async def get_customer_messages(customer_id: int, db: Session = Depends(get_db))
     } for m in msgs]
 
 @router.get("/export/excel")
-async def export_excel_download():
-    """Download on-demand the latest 9-column Excel file."""
-    path = settings.EXCEL_EXPORT_PATH if os.path.exists(settings.EXCEL_EXPORT_PATH) else settings.SHARED_EXCEL_PATH
-    if os.path.exists(path):
+async def export_excel_download(db: Session = Depends(get_db)):
+    """Download on-demand the latest 9-column Excel file generated dynamically from the database."""
+    excel_path = os.path.join(settings.DATA_DIR, "WhatsApp_Conversations.xlsx")
+    customers = db.query(Customer).order_by(Customer.id.asc()).all()
+    for cust in customers:
+        try:
+            with _excel_lock:
+                _write_to_workbook(excel_path, cust)
+        except Exception:
+            pass
+
+    if not os.path.exists(excel_path):
+        if os.path.exists(settings.EXCEL_EXPORT_PATH):
+            excel_path = settings.EXCEL_EXPORT_PATH
+        elif os.path.exists(settings.SHARED_EXCEL_PATH):
+            excel_path = settings.SHARED_EXCEL_PATH
+
+    if os.path.exists(excel_path):
         return FileResponse(
-            path,
+            excel_path,
             filename="WhatsApp_Conversations.xlsx",
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-    return {"error": "Excel file not generated yet."}
+    return {"error": "No records found in database yet."}
 
 @router.get("/api/reset-phone")
 async def reset_phone_guard(phone: str = Query(...)):
