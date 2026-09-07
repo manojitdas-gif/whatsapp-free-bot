@@ -17,6 +17,81 @@ router = APIRouter(prefix="", tags=["Dashboard"])
 templates_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
 templates = Jinja2Templates(directory=templates_dir)
 
+@router.get("/scan", response_class=HTMLResponse)
+async def live_qr_scanner():
+    """Live interactive QR code scanner with auto-refresh every 10s."""
+    html_content = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Scan WhatsApp QR Code — 24/7 Cloud Bot</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 16px; padding: 32px; max-width: 440px; width: 100%; text-align: center; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5); }
+    h1 { font-size: 20px; margin-top: 0; margin-bottom: 8px; color: #38bdf8; }
+    p { font-size: 14px; color: #94a3b8; margin-bottom: 20px; }
+    .qr-box { background: white; padding: 16px; border-radius: 12px; display: inline-block; min-width: 250px; min-height: 250px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.2); }
+    img { width: 250px; height: 250px; display: block; }
+    .status { margin-top: 20px; font-size: 14px; font-weight: 500; padding: 8px 16px; border-radius: 9999px; display: inline-block; background: #334155; color: #cbd5e1; }
+    .status.connected { background: #065f46; color: #34d399; font-size: 16px; padding: 12px 24px; }
+    .instructions { text-align: left; font-size: 13px; color: #cbd5e1; margin-top: 24px; background: #0f172a; padding: 16px; border-radius: 8px; line-height: 1.6; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>📱 Link WhatsApp to Cloud</h1>
+    <p>Live QR Code (Auto-refreshes every 10 seconds)</p>
+    <div class="qr-box">
+      <img id="qr-img" src="" alt="Loading QR code..." />
+    </div>
+    <div id="status-badge" class="status">Connecting to Evolution API...</div>
+    <div class="instructions">
+      <strong>How to Scan:</strong><br>
+      1. Open <strong>WhatsApp</strong> on your phone (<code>+91 6290 164 699</code>)<br>
+      2. Tap <strong>Settings</strong> &rarr; <strong>Linked Devices</strong><br>
+      3. Tap <strong>Link a Device</strong> &rarr; Scan this screen!
+    </div>
+  </div>
+  <script>
+    const serverUrl = "https://whatsapp-gateway-nsr1.onrender.com";
+    const apiKey = "mysecretkey123";
+    const instance = "whatsapp-bot";
+    let isConnected = false;
+    async function checkState() {
+      try {
+        const res = await fetch(`${serverUrl}/instance/connectionState/${instance}`, { headers: { "apikey": apiKey } });
+        const data = await res.json();
+        const state = data?.instance?.state;
+        if (state === "open") {
+          isConnected = true;
+          document.getElementById("status-badge").className = "status connected";
+          document.getElementById("status-badge").innerHTML = "✅ WhatsApp Connected Successfully!";
+          document.querySelector(".qr-box").innerHTML = "<div style='color:#065f46;font-size:48px;padding:80px 0;'>✓</div>";
+        }
+      } catch (e) {}
+    }
+    async function refreshQR() {
+      if (isConnected) return;
+      try {
+        const res = await fetch(`${serverUrl}/instance/connect/${instance}`, { headers: { "apikey": apiKey } });
+        const data = await res.json();
+        if (data.base64) {
+          document.getElementById("qr-img").src = data.base64;
+          document.getElementById("status-badge").innerText = "Scan QR code with your phone camera";
+        }
+      } catch (e) {
+        document.getElementById("status-badge").innerText = "Retrying connection to cloud...";
+      }
+    }
+    checkState();
+    refreshQR();
+    setInterval(() => { checkState(); refreshQR(); }, 10000);
+    setInterval(checkState, 3000);
+  </script>
+</body>
+</html>"""
+    return HTMLResponse(content=html_content)
+
 @router.get("/admin", response_class=HTMLResponse)
 async def admin_dashboard(request: Request, db: Session = Depends(get_db)):
     total_customers = db.query(Customer).count()
