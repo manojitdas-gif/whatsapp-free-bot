@@ -4,6 +4,7 @@ from app.whatsapp.meta_cloud import MetaCloudWhatsAppProvider
 from app.whatsapp.mock_provider import MockWhatsAppProvider
 from app.whatsapp.local_web import LocalWebWhatsAppProvider
 from app.whatsapp.green_api import GreenAPIProvider
+from app.whatsapp.evolution_api import EvolutionAPIProvider
 
 _provider_instance = None
 
@@ -13,6 +14,8 @@ def get_whatsapp_provider() -> WhatsAppProvider:
         p_type = settings.WHATSAPP_PROVIDER.lower()
         if p_type == "meta_cloud":
             _provider_instance = MetaCloudWhatsAppProvider()
+        elif p_type in ("evolution", "evolution_api"):
+            _provider_instance = EvolutionAPIProvider()
         elif p_type in ("green_api", "cloud_gateway", "gateway"):
             _provider_instance = GreenAPIProvider()
         elif p_type == "mock":
