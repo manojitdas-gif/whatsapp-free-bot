@@ -100,13 +100,20 @@ def extract_message_info(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # 2. Evolution API / Baileys generic format
     event = payload.get("event", "")
     data = payload.get("data", {}) or payload
-    if event == "messages.upsert" or "key" in data:
+    if isinstance(data, list) and len(data) > 0:
+        data = data[0]
+    if isinstance(data, dict) and (event == "messages.upsert" or "key" in data):
         key = data.get("key", {})
         if key.get("fromMe"):
             return None
         remote_jid = key.get("remoteJid", "")
+        # Ignore status broadcasts, group chats, newsletters
+        if not remote_jid or "broadcast" in remote_jid or remote_jid.endswith("@g.us") or remote_jid.endswith("@newsletter"):
+            return None
         clean_phone = re.sub(r'[^0-9]', '', remote_jid)
-        msg_obj = data.get("message", {})
+        if not clean_phone:
+            return None
+        msg_obj = data.get("message", {}) or {}
         text = (
             msg_obj.get("conversation") or
             msg_obj.get("extendedTextMessage", {}).get("text") or
