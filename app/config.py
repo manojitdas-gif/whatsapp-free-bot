@@ -16,8 +16,8 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "sqlite:///./data/whatsapp_production.db"
 
-    # WhatsApp Provider: "meta_cloud", "local_web", or "mock"
-    WHATSAPP_PROVIDER: str = "local_web"
+    # WhatsApp Provider: "evolution_api", "green_api", "meta_cloud", "local_web", or "mock"
+    WHATSAPP_PROVIDER: str = os.getenv("WHATSAPP_PROVIDER", "evolution_api")
 
     # Meta Cloud API Config (When using Meta provider)
     WHATSAPP_API_URL: str = "https://graph.facebook.com/v19.0"
