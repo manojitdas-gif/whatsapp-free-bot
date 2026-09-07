@@ -57,6 +57,30 @@ def _init_completed():
 
 _init_completed()
 
+def unwrap_evolution_message(msg_obj: dict) -> tuple[dict, str]:
+    if not isinstance(msg_obj, dict):
+        return {}, "text"
+    if "ephemeralMessage" in msg_obj:
+        msg_obj = msg_obj["ephemeralMessage"].get("message", {}) or {}
+    if "viewOnceMessage" in msg_obj:
+        msg_obj = msg_obj["viewOnceMessage"].get("message", {}) or {}
+    if "viewOnceMessageV2" in msg_obj:
+        msg_obj = msg_obj["viewOnceMessageV2"].get("message", {}) or {}
+    if "documentWithCaptionMessage" in msg_obj:
+        msg_obj = msg_obj["documentWithCaptionMessage"].get("message", {}) or {}
+
+    if "imageMessage" in msg_obj:
+        return msg_obj["imageMessage"], "imageMessage"
+    elif "documentMessage" in msg_obj:
+        return msg_obj["documentMessage"], "documentMessage"
+    elif "videoMessage" in msg_obj:
+        return msg_obj["videoMessage"], "videoMessage"
+    elif "audioMessage" in msg_obj:
+        return msg_obj["audioMessage"], "audioMessage"
+    elif "extendedTextMessage" in msg_obj:
+        return msg_obj["extendedTextMessage"], "extendedTextMessage"
+    return msg_obj, "text"
+
 def extract_message_info(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Extracts standardized message details from Green API or generic gateway payload."""
     type_webhook = payload.get("typeWebhook", "")
@@ -97,36 +121,12 @@ def extract_message_info(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 "type": type_msg
             }
 
-def unwrap_evolution_message(msg_obj: dict) -> tuple[dict, str]:
-    if not isinstance(msg_obj, dict):
-        return {}, "text"
-    if "ephemeralMessage" in msg_obj:
-        msg_obj = msg_obj["ephemeralMessage"].get("message", {}) or {}
-    if "viewOnceMessage" in msg_obj:
-        msg_obj = msg_obj["viewOnceMessage"].get("message", {}) or {}
-    if "viewOnceMessageV2" in msg_obj:
-        msg_obj = msg_obj["viewOnceMessageV2"].get("message", {}) or {}
-    if "documentWithCaptionMessage" in msg_obj:
-        msg_obj = msg_obj["documentWithCaptionMessage"].get("message", {}) or {}
-
-    if "imageMessage" in msg_obj:
-        return msg_obj["imageMessage"], "imageMessage"
-    elif "documentMessage" in msg_obj:
-        return msg_obj["documentMessage"], "documentMessage"
-    elif "videoMessage" in msg_obj:
-        return msg_obj["videoMessage"], "videoMessage"
-    elif "audioMessage" in msg_obj:
-        return msg_obj["audioMessage"], "audioMessage"
-    elif "extendedTextMessage" in msg_obj:
-        return msg_obj["extendedTextMessage"], "extendedTextMessage"
-    return msg_obj, "text"
-
     # 2. Evolution API / Baileys generic format
-    event = payload.get("event", "")
+    event = (payload.get("event", "") or "").lower()
     data = payload.get("data", {}) or payload
     if isinstance(data, list) and len(data) > 0:
         data = data[0]
-    if isinstance(data, dict) and (event == "messages.upsert" or "key" in data):
+    if isinstance(data, dict) and (event in ("messages.upsert", "messages_upsert") or "key" in data or "message" in data):
         key = data.get("key", {})
         if key.get("fromMe"):
             return None
