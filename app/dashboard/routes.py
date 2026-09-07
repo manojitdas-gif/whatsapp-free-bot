@@ -93,6 +93,36 @@ async def reset_phone_guard(phone: str = Query(...)):
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
+@router.get("/api/clear-customer")
+async def clear_customer_from_db(phone: str = Query(...), db: Session = Depends(get_db)):
+    """Completely deletes all traces of a customer number from DB so they start 100% fresh."""
+    import re
+    from app.ai.conversation_agent import reset_phone_guard_record
+    phone_digits = re.sub(r"[^0-9]", "", phone)[-10:]
+    try:
+        reset_phone_guard_record(phone_digits)
+        customers = db.query(Customer).filter(Customer.whatsapp_number.like(f"%{phone_digits}%")).all()
+        for cust in customers:
+            convs = db.query(Conversation).filter(Conversation.customer_id == cust.id).all()
+            for c in convs:
+                db.query(Message).filter(Message.conversation_id == c.id).delete()
+                db.delete(c)
+            db.delete(cust)
+        db.commit()
+
+        save_dir = os.path.join(settings.DATA_DIR, "customer_files")
+        if os.path.exists(save_dir):
+            for f in os.listdir(save_dir):
+                if f.startswith(f"{phone_digits}_"):
+                    try:
+                        os.remove(os.path.join(save_dir, f))
+                    except Exception:
+                        pass
+
+        return {"status": "ok", "phone": phone_digits, "message": f"Customer {phone_digits} completely cleared from database! You can now test from scratch!"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
 @router.get("/api/db-status")
 async def db_status(phone: str = Query(None)):
     """Check phone_flow_guard state on Render's cloud DB."""
