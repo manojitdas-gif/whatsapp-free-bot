@@ -156,12 +156,47 @@ def update_phone_guard_state(phone_digits: str, sent_response: str):
     except Exception as e:
         logger.warning(f"[AGENT] Error updating phone_flow_guard: {e}")
 
+def fetch_customer_messages_from_db(phone_digits: str, since_ts: int = 0) -> List[Dict[str, Any]]:
+    """Fetches all customer messages directly from persistent SQLite database."""
+    results = []
+    try:
+        db_path = os.path.join(settings.DATA_DIR, "whatsapp_production.db")
+        if not os.path.exists(db_path):
+            return results
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT m.text, m.direction, m.message_type, m.media_reference, strftime('%s', m.timestamp) as ts
+            FROM messages m
+            JOIN conversations c ON m.conversation_id = c.id
+            JOIN customers cust ON c.customer_id = cust.id
+            WHERE cust.whatsapp_number LIKE ?
+            ORDER BY m.id ASC
+        ''', (f"%{phone_digits}%",))
+        rows = cur.fetchall()
+        conn.close()
+        for r in rows:
+            m_text, m_dir, m_type, m_media, m_ts = r
+            ts_int = int(m_ts) if m_ts else 0
+            if since_ts and ts_int and ts_int < since_ts:
+                continue
+            results.append({
+                "text": m_text or "",
+                "direction": m_dir or "INBOUND",
+                "type": m_type or "text",
+                "media": m_media or "",
+                "timestamp": ts_int
+            })
+    except Exception as e:
+        logger.warning(f"[AGENT] Error reading DB messages for {phone_digits}: {e}")
+    return results
+
 def fetch_chat_history_from_gateway(phone: str, count: int = 25) -> List[Dict[str, Any]]:
-    """Fetches live conversation history from Green API."""
-    inst_id = settings.GATEWAY_INSTANCE_ID
-    token = settings.GATEWAY_API_TOKEN
-    base_url = settings.GATEWAY_API_URL
-    if not inst_id or not token:
+    """Fallback to fetch live conversation history from gateway if configured."""
+    inst_id = getattr(settings, 'GATEWAY_INSTANCE_ID', None)
+    token = getattr(settings, 'GATEWAY_API_TOKEN', None)
+    base_url = getattr(settings, 'GATEWAY_API_URL', None)
+    if not inst_id or not token or not base_url or "green-api" not in base_url:
         return []
 
     clean_p = re.sub(r'[^0-9]', '', phone)
@@ -189,12 +224,20 @@ def evaluate_customer_with_ai_agent(
     has_media: bool = False,
     media_filename: str = "",
     media_text: str = "",
-    profile_name: str = ""
+    profile_name: str = "",
+    existing_requirements: str = "",
+    existing_company: str = "",
+    existing_address: str = "",
+    existing_contact: str = "",
+    existing_gst: str = ""
 ) -> AgentDecision:
     """
-    AI Agent that reads full chronological conversation history,
-    verifies past bot responses, extracts cumulative entities,
-    and guarantees strict one-time execution per number.
+    Intelligent AI Agent:
+    1. Analyzes ALL customer documents, photos, spreadsheets, and files (cumulative).
+    2. Analyzes ALL chronological conversation history (past chats + current message).
+    3. Evaluates which details (requirements, business details) are ALREADY available.
+    4. Guarantees that details/requirements already provided are NEVER requested again.
+    5. Dispatches Response 1, Response 2, Response 3, or SILENCE with zero repeated or wrong replies.
     """
     phone_digits = re.sub(r'[^0-9]', '', phone)[-10:]
     guard = get_phone_guard_state(phone_digits)
@@ -204,7 +247,7 @@ def evaluate_customer_with_ai_agent(
     is_greeting = lower_text in ("hi", "hello", "hey", "namaste", "namaskar", "start", "info", "help", "hii", "helo")
     is_followup = is_conversational_followup(incoming_text)
 
-    # 1. Post-Completion Check: ONLY if flow was completed in our persistent DB
+    # 1. Post-Completion Check: If flow was already completed in our persistent DB
     if guard["is_completed"] or guard["response_1_sent"]:
         if not guard.get("post_help_sent"):
             logger.info(f"[AGENT] Customer {phone} flow already completed. Triggering one post-completion help message.")
@@ -219,75 +262,74 @@ def evaluate_customer_with_ai_agent(
             logger.info(f"[AGENT] Customer {phone} post-completion help already sent once. Silencing follow-up.")
             return AgentDecision(action="SILENCE", reason="Post-completion help message already sent once.")
 
-    # 2. Greeting Check for New / Reset Customer (Flow NOT completed)
-    # Greetings ALWAYS start the conversation with Response 2
-    if is_greeting:
-        logger.info(f"[AGENT] New / reset customer {phone} sent greeting ('{incoming_text}'). Replying with Response 2.")
-        update_phone_guard_state(phone_digits, "RESPONSE_2")
-        return AgentDecision(
-            action="REPLY",
-            response_type="RESPONSE_2",
-            reply_text=get_response_template("RESPONSE_2"),
-            reason=f"Customer greeting '{incoming_text}' received. Starting flow with Response 2."
-        )
+    # 2. Fetch Full Chronological History from SQLite Database
+    db_history = fetch_customer_messages_from_db(phone_digits, since_ts=reset_ts)
+    all_incoming_texts = [m["text"] for m in db_history if m["direction"] == "INBOUND" and m["text"] and not m["text"].startswith("[")]
 
-    # 3. Fetch Live Chat History from WhatsApp Gateway (only messages AFTER reset_ts)
-    raw_history = fetch_chat_history_from_gateway(phone, count=25)
-    history_messages = list(reversed(raw_history)) if raw_history else []
+    # Append current incoming text if not already the last item
+    if incoming_text and (not all_incoming_texts or all_incoming_texts[-1] != incoming_text):
+        all_incoming_texts.append(incoming_text)
+
+    # 3. Gather Attachment Texts (Current + All Previous Documents in Storage)
+    att_list = []
+    if media_text:
+        att_list.append(media_text)
+
+    save_dir = os.path.join(settings.DATA_DIR, "customer_files")
+    if os.path.exists(save_dir):
+        for fname in os.listdir(save_dir):
+            if fname.startswith(f"{phone_digits}_"):
+                fpath = os.path.join(save_dir, fname)
+                try:
+                    from document_analyzer import analyze_file
+                    _, prev_raw = analyze_file(fpath)
+                    if prev_raw and prev_raw not in att_list:
+                        att_list.append(prev_raw)
+                except Exception:
+                    pass
+
+    # 4. Cumulative Extraction across ALL Messages and ALL Documents
+    extraction = analyze_conversation(
+        all_incoming_texts,
+        attachment_texts=att_list if att_list else None,
+        profile_name=profile_name
+    )
+
+    # 5. Check what details are ALREADY AVAILABLE
+    # Requirements Check:
+    has_products = bool(
+        existing_requirements
+        or extraction.product_requirements
+        or extraction.raw_requirement_text
+        or has_media
+        or bool(media_text)
+        or bool(att_list)
+    )
+
+    # Business Details Check:
+    company_cand = (existing_company or extraction.company_business_name or "").strip()
+    has_company = bool(company_cand and len(company_cand) >= 2 and company_cand.lower() not in ("none", "null", "not applicable", "customer"))
+
+    address_cand = (existing_address or extraction.complete_address or "").strip()
+    has_address = bool(address_cand and len(address_cand) >= 3)
+
+    contact_cand = (existing_contact or extraction.contact_person_name or "").strip()
+    has_contact = bool((contact_cand and len(contact_cand) >= 2 and contact_cand.lower() not in ("none", "null", "customer")) or has_company)
+
+    has_business_details = has_company and has_address and has_contact
 
     past_r1_sent = guard["response_1_sent"]
     past_r2_sent = guard["response_2_sent"]
     past_r3_sent = guard["response_3_sent"]
 
-    all_incoming_texts = []
-    has_any_media_in_history = has_media or bool(media_text)
-
-    for m in history_messages:
-        # Ignore messages sent before the last reset
-        m_ts = m.get("timestamp", 0)
-        if reset_ts and m_ts and m_ts < reset_ts:
-            continue
-
-        m_type = m.get("type", "")
-        text = m.get("textMessage", "") or m.get("caption", "") or ""
-        
-        if m_type == "incoming":
-            msg_t = m.get("typeMessage", "")
-            if msg_t in ("imageMessage", "documentMessage", "fileMessage"):
-                has_any_media_in_history = True
-            if text:
-                all_incoming_texts.append(text)
-
-    # Append current incoming message if not in history yet
-    if incoming_text and (not all_incoming_texts or all_incoming_texts[-1] != incoming_text):
-        all_incoming_texts.append(incoming_text)
-
-    # 4. Check for Conversational Follow-up chatter after Response 3
-    if is_followup and past_r3_sent:
-        logger.info(f"[AGENT] Customer {phone} sent follow-up query after Response 3. Staying silent.")
-        return AgentDecision(action="SILENCE", reason="Follow-up message after Response 3. No repeated prompt.")
-
-    # 5. Extract Cumulative Entities across ALL customer messages in history + documents/photos
-    att_list = [media_text] if media_text else None
-    extraction = analyze_conversation(all_incoming_texts, attachment_texts=att_list, profile_name=profile_name)
-
-    # Check Requirements
-    has_products = bool(extraction.product_requirements or extraction.raw_requirement_text or has_any_media_in_history)
-
-    # Check Business Details
-    has_company = bool(extraction.company_business_name and len(extraction.company_business_name.strip()) >= 2)
-    has_address = bool(extraction.complete_address and len(extraction.complete_address.strip()) >= 3)
-    has_contact = bool((extraction.contact_person_name and len(extraction.contact_person_name.strip()) >= 2) or has_company)
-
-    has_business_details = has_company and has_address and has_contact
-
     logger.info(
-        f"[AGENT] Evaluation for {phone}: products={has_products}, company={has_company}, "
-        f"address={has_address}, contact={has_contact} | past: r1={past_r1_sent}, r2={past_r2_sent}, r3={past_r3_sent}"
+        f"[AGENT] Cumulative check for {phone}: products={has_products}, company={has_company}, "
+        f"address={has_address}, contact={has_contact} | past sent: r1={past_r1_sent}, r2={past_r2_sent}, r3={past_r3_sent}"
     )
 
-    # 5. Determine Decision
-    # Scenario A: Requirements AND Business Details are available
+    # 6. STABLE DECISION LOGIC: DO NOT GENERATE REPEAT REQUESTS FOR DETAILS ALREADY AVAILABLE
+    
+    # SCENARIO 1: Both Requirements AND Business Details are Available
     if has_products and has_business_details:
         if not past_r1_sent:
             update_phone_guard_state(phone_digits, "RESPONSE_1")
@@ -295,7 +337,7 @@ def evaluate_customer_with_ai_agent(
                 action="REPLY",
                 response_type="RESPONSE_1",
                 reply_text=get_response_template("RESPONSE_1"),
-                reason="All requirements and business details received. Sending Response 1.",
+                reason="All requirements and business details received. Sending confirmation Response 1.",
                 extraction=extraction
             )
         else:
@@ -305,27 +347,34 @@ def evaluate_customer_with_ai_agent(
                     action="REPLY",
                     response_type="RESPONSE_POST_COMPLETION",
                     reply_text=get_response_template("RESPONSE_POST_COMPLETION"),
-                    reason="Flow completed. Triggering post-completion help message.",
+                    reason="Details already submitted. Sending one post-completion help message.",
                     extraction=extraction
                 )
-            return AgentDecision(action="SILENCE", reason="Response 1 and help message already sent.", extraction=extraction)
+            return AgentDecision(action="SILENCE", reason="All details already received and confirmed.", extraction=extraction)
 
-    # Scenario B: Requirements are present, but Business Details are missing
+    # SCENARIO 2: Requirements are Available, but Business Details are Missing
     elif has_products and not has_business_details:
+        # Requirements are ALREADY available! NEVER send Response 2 (do not ask for requirements again).
         if not past_r3_sent:
             update_phone_guard_state(phone_digits, "RESPONSE_3")
             return AgentDecision(
                 action="REPLY",
                 response_type="RESPONSE_3",
                 reply_text=get_response_template("RESPONSE_3"),
-                reason="Requirements present, asking for business details (Response 3).",
+                reason="Requirements are already available. Requesting missing business details (Response 3).",
                 extraction=extraction
             )
         else:
-            logger.info(f"[AGENT] Response 3 already sent once to {phone}. Staying silent on incomplete details.")
-            return AgentDecision(action="SILENCE", reason="Response 3 already sent once. Staying silent.", extraction=extraction)
+            # Response 3 was ALREADY sent once!
+            # Do NOT ask again for the same details! Stay SILENT!
+            logger.info(f"[AGENT] Response 3 already sent once to {phone}. Staying silent on repeat/followup message.")
+            return AgentDecision(
+                action="SILENCE",
+                reason="Requirements already available and Response 3 was already sent once. Staying silent to avoid repeating requests.",
+                extraction=extraction
+            )
 
-    # Scenario C: Requirements are missing
+    # SCENARIO 3: Requirements are NOT yet available (e.g. Greeting or Incomplete Inquiry)
     else:
         if not past_r2_sent:
             update_phone_guard_state(phone_digits, "RESPONSE_2")
@@ -333,9 +382,15 @@ def evaluate_customer_with_ai_agent(
                 action="REPLY",
                 response_type="RESPONSE_2",
                 reply_text=get_response_template("RESPONSE_2"),
-                reason="Customer greeting / inquiry without requirements. Sending Response 2.",
+                reason="No requirements found. Sending Response 2 to request product requirements.",
                 extraction=extraction
             )
         else:
+            # Response 2 was ALREADY sent once!
+            # Do NOT repeat Response 2!
             logger.info(f"[AGENT] Response 2 already sent once to {phone}. Staying silent.")
-            return AgentDecision(action="SILENCE", reason="Response 2 already sent once. Staying silent.", extraction=extraction)
+            return AgentDecision(
+                action="SILENCE",
+                reason="Response 2 was already sent once. Waiting for customer requirements without repeating.",
+                extraction=extraction
+            )
