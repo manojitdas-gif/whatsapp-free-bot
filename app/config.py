@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     # Evolution API Settings (100% Free Open-Source Cloud Gateway)
     EVOLUTION_API_URL: str = os.getenv("EVOLUTION_API_URL", "https://whatsapp-gateway-nsr1.onrender.com")
     EVOLUTION_API_KEY: str = os.getenv("EVOLUTION_API_KEY", "mysecretkey123")
-    EVOLUTION_INSTANCE_NAME: str = os.getenv("EVOLUTION_INSTANCE_NAME", "whatsapp-bot")
+    EVOLUTION_INSTANCE_NAME: str = os.getenv("EVOLUTION_INSTANCE_NAME", "whatsapp-bot-v2")
 
     # Cloud Google Sheets Sync URL (Google Apps Script Webhook)
     GOOGLE_SHEET_WEBHOOK_URL: Optional[str] = os.getenv(
