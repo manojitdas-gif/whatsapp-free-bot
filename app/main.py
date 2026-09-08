@@ -12,13 +12,33 @@ from app.webhooks.whatsapp_router import router as webhook_router
 from app.webhooks.cloud_router import router as cloud_router
 from app.dashboard.routes import router as dashboard_router
 
+import asyncio
+import httpx
+
+async def _keep_alive_loop():
+    """Keeps Render bot and WhatsApp Gateway awake 24/7 so connections never disconnect."""
+    await asyncio.sleep(60)
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                await client.get("https://whatsapp-free-bot-1.onrender.com/health")
+                await client.get(
+                    "https://whatsapp-gateway-nsr1.onrender.com/instance/connectionState/whatsapp-bot-v2",
+                    headers={"apikey": "mysecretkey123"}
+                )
+        except Exception:
+            pass
+        await asyncio.sleep(480)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: initialize database tables
     print(f"[{settings.APP_NAME}] Initializing database tables...")
     init_db()
     print(f"[{settings.APP_NAME}] Database ready. Running in {settings.ENVIRONMENT} mode.")
+    ka_task = asyncio.create_task(_keep_alive_loop())
     yield
+    ka_task.cancel()
     # Shutdown
     print(f"[{settings.APP_NAME}] Shutting down safely.")
 
