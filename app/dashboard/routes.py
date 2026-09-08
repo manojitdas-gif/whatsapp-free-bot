@@ -55,7 +55,7 @@ async def live_qr_scanner():
   <script>
     const serverUrl = "https://whatsapp-gateway-nsr1.onrender.com";
     const apiKey = "mysecretkey123";
-    const instance = "whatsapp-bot";
+    const instance = "whatsapp-bot-v2";
     let isConnected = false;
     async function checkState() {
       try {
